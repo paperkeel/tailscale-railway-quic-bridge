@@ -294,6 +294,33 @@ func TestHandleTCPRejectsInvalidRequests(t *testing.T) {
 	}
 }
 
+func TestHandleTCPRejectsMalformedFrames(t *testing.T) {
+	edge, connector := testConnectorQUICPair(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	t.Cleanup(cancel)
+	edgeStream, err := edge.OpenStreamSync(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := edgeStream.Write([]byte{0, 0, 0, 1, '{'}); err != nil {
+		t.Fatal(err)
+	}
+	connectorStream, err := connector.AcceptStream(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handled := make(chan struct{})
+	go func() {
+		testClient(config.Connector{}).handleTCP(connectorStream, "test-session", nil)
+		close(handled)
+	}()
+	select {
+	case <-handled:
+	case <-ctx.Done():
+		t.Fatal("handleTCP() did not reject the malformed frame")
+	}
+}
+
 func TestHandleTCPReportsAnUnreachableDestination(t *testing.T) {
 	edge, connector := testConnectorQUICPair(t)
 	client := testClient(config.Connector{DialTimeout: time.Second})
