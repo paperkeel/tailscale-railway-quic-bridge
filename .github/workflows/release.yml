@@ -45,6 +45,8 @@ jobs:
           build-args: VERSION=${{ github.ref_name }}
           provenance: mode=max
           sbom: true
+          cache-from: type=gha,scope=${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component }}
       - uses: actions/attest-build-provenance@78e6cbd37d0ac1a40113c04f2037dacf1ea3f12e # v4
         with:
           subject-name: ghcr.io/bearfire-dev/tailscale-railway-quic-bridge-${{ matrix.component }}

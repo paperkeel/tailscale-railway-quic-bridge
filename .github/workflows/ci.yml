@@ -37,3 +37,5 @@ jobs:
           file: Dockerfile.${{ matrix.component }}
           push: false
           tags: tailbridge-${{ matrix.component }}:ci
+          cache-from: type=gha,scope=${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component }}
