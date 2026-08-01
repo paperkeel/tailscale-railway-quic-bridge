@@ -1,0 +1,10 @@
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile.connector"
+
+[deploy]
+healthcheckPath = "/readyz"
+healthcheckTimeout = 60
+restartPolicyType = "ALWAYS"
+overlapSeconds = 20
+drainingSeconds = 15

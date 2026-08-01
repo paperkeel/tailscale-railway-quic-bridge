@@ -1,0 +1,6 @@
+do_token             = "dop_v1_replace_me"
+name                 = "tailbridge-production"
+region               = "nyc3"
+size                 = "s-1vcpu-1gb"
+ssh_key_fingerprints = ["replace-me"]
+ssh_source_addresses = ["203.0.113.10/32"]

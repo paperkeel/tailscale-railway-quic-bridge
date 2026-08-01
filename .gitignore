@@ -1,0 +1,16 @@
+.env
+*.env
+!*.env.example
+bin/
+coverage.out
+dist/
+*.pem
+*.key
+tailscale-policy.hujson
+.terraform/
+*.tfvars
+!*.tfvars.example
+*.tfstate
+*.tfstate.*
+.mise.toml
+/private/

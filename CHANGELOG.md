@@ -1,0 +1,15 @@
+# Changelog
+
+This project uses Semantic Versioning.
+
+## 0.1.0-alpha.1 - 2026-08-01
+
+### Added
+
+- Direct Tailscale edge with a QUIC backhaul to Railway.
+- Transparent IPv6 TCP and UDP forwarding.
+- Mutual TLS with URI identities and 90-day leaf certificates.
+- Stable Tailscale state and ordered Railway deployment replacement.
+- Railway, Docker Compose, and DigitalOcean deployment templates.
+- JSON logs, Prometheus metrics, OpenTelemetry traces, and Sentry error reporting.
+- Multi-platform container release workflow with provenance and SBOM data.

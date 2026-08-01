@@ -1,0 +1,21 @@
+services:
+  edge:
+    image: ghcr.io/bearfire-dev/tailscale-railway-quic-bridge-edge:0.1.0-alpha.1
+    env_file:
+      - edge.env
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - tailscale-state:/var/lib/tailscale
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/run/tailscale
+
+volumes:
+  tailscale-state:
