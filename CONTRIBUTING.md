@@ -1,19 +1,23 @@
 # Contributing
 
-Install Go 1.26.5 through `mise`.
+1. Install Go 1.26.5 through `mise`.
 
-Run these checks before a pull request:
+2. Run the standard checks before you open a pull request:
 
-```bash
-mise x go@1.26.5 -- go test -race ./...
-mise x go@1.26.5 -- go vet ./...
-mise x go@1.26.5 -- go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
-unformatted="$(mise x go@1.26.5 -- gofmt -l .)" || exit 1
-test -z "$unformatted"
-```
+   ```bash
+   make check
+   ```
 
-Keep protocol changes backward compatible within one major version.
+3. Run the complete audit when you change the data path, network policy, images, or deployment files:
 
-Add tests for configuration, protocol, routing, and security changes.
+   ```bash
+   make audit
+   ```
 
-Do not include credentials, generated certificates, or user traffic.
+   This command uses privileged Docker for the isolated network test. It does not deploy infrastructure.
+
+4. Keep protocol changes backward compatible within one major version.
+
+5. Add tests for configuration, protocol, routing, and security changes.
+
+6. Do not include credentials, generated certificates, or user traffic.

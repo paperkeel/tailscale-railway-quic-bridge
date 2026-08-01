@@ -4,7 +4,7 @@ Tailbridge extends a private tailnet into a Railway environment. Treat both cont
 
 ## Authentication
 
-Tailscale authenticates users and the edge. Mutual TLS authenticates the Tailbridge pair.
+Tailscale authenticates users and the edge. Mutual TLS authenticates the Tailbridge edge and connector.
 
 Each certificate contains a URI identity. The peer validates the role and connector identifier.
 
@@ -19,6 +19,10 @@ Both Tailbridge components also validate destination CIDRs. A connector cannot r
 Generated environment files contain private keys. Store them with mode `0600`.
 
 Do not commit environment files. Do not place secrets in image build arguments.
+
+The recovery process requires a tagged, preauthorized, non-ephemeral Tailscale credential.
+
+An ephemeral credential cannot restore a stable Tailscale machine identity.
 
 ## Exposure
 

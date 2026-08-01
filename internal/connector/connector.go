@@ -2,6 +2,7 @@ package connector
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
@@ -27,19 +28,27 @@ type Client struct {
 	status  *status.Server
 	version string
 	started int64
-	udpMu   sync.Mutex
-	udp     map[uint64]*udpFlow
 }
 
 type udpFlow struct {
 	connection  *net.UDPConn
 	source      netip.AddrPort
 	destination netip.AddrPort
-	lastUsed    time.Time
 }
 
+type udpSession struct {
+	client     *Client
+	connection *quic.Conn
+	routes     []netip.Prefix
+	mu         sync.Mutex
+	flows      map[uint64]*udpFlow
+	closed     bool
+}
+
+const maxUDPPayload = 8 * 1024
+
 func New(cfg config.Connector, logger *slog.Logger, state *status.Server, version string) *Client {
-	return &Client{config: cfg, logger: logger, status: state, version: version, started: time.Now().UnixNano(), udp: make(map[uint64]*udpFlow)}
+	return &Client{config: cfg, logger: logger, status: state, version: version, started: time.Now().UnixNano()}
 }
 
 func (c *Client) Run(ctx context.Context) error {
@@ -51,7 +60,7 @@ func (c *Client) Run(ctx context.Context) error {
 	for ctx.Err() == nil {
 		conn, err := quic.DialAddr(ctx, c.config.EdgeEndpoint, tlsConfig, transport.QUICConfig(c.config.MaxTCPFlows))
 		if err != nil {
-			c.logger.Error("edge connection failed", "event.name", "connector.connect", "error", err, "retry_ms", delay.Milliseconds())
+			c.logger.Error("The connector could not connect to the edge.", "event.name", "connector.connect", "error", err, "retry_ms", delay.Milliseconds())
 			if !wait(ctx, jitter(delay)) {
 				break
 			}
@@ -59,8 +68,10 @@ func (c *Client) Run(ctx context.Context) error {
 			continue
 		}
 		sessionStarted := time.Now()
-		if err := c.serve(ctx, conn); err != nil && ctx.Err() == nil {
-			c.logger.Error("connector session failed", "event.name", "connector.session", "error", err)
+		serveErr := c.serve(ctx, conn)
+		_ = conn.CloseWithError(0, "The connector session ended.")
+		if serveErr != nil && ctx.Err() == nil {
+			c.logger.Error("connector session failed", "event.name", "connector.session", "error", serveErr)
 		}
 		c.status.SetReady(false)
 		if time.Since(sessionStarted) >= c.config.ReconnectMax {
@@ -76,10 +87,13 @@ func (c *Client) Run(ctx context.Context) error {
 }
 
 func (c *Client) serve(ctx context.Context, conn *quic.Conn) error {
-	control, err := conn.OpenStreamSync(ctx)
+	handshakeContext, cancelHandshake := context.WithTimeout(ctx, 10*time.Second)
+	defer cancelHandshake()
+	control, err := conn.OpenStreamSync(handshakeContext)
 	if err != nil {
 		return err
 	}
+	_ = control.SetDeadline(time.Now().Add(10 * time.Second))
 	routes := make([]string, 0, len(c.config.AllowedDestinations))
 	for _, route := range c.config.AllowedDestinations {
 		routes = append(routes, route.String())
@@ -92,118 +106,206 @@ func (c *Client) serve(ctx context.Context, conn *quic.Conn) error {
 	if err := protocol.ReadFrame(control, &accepted); err != nil {
 		return err
 	}
+	_ = control.SetDeadline(time.Time{})
+	if accepted.SessionID == "" || accepted.MaxTCPFlows < 1 {
+		return errors.New("the edge returned an invalid session response")
+	}
+	acceptedRoutes, err := config.ValidateAcceptedRoutes(accepted.Routes, c.config.AllowedDestinations)
+	if err != nil {
+		return fmt.Errorf("validate accepted routes: %w", err)
+	}
 	c.status.SetReady(true)
 	go c.status.ObserveQUIC(conn.Context().Done(), conn)
 	c.logger.Info("edge session ready", "event.name", "connector.session", "session_id", accepted.SessionID, "connector.id", c.config.ConnectorID)
-	go c.receiveUDP(conn)
+	udp := &udpSession{client: c, connection: conn, routes: acceptedRoutes, flows: make(map[uint64]*udpFlow)}
+	defer udp.close()
+	go udp.receive()
 	for {
 		stream, err := conn.AcceptStream(ctx)
 		if err != nil {
 			return err
 		}
-		go c.handleTCP(stream, accepted.SessionID)
+		go c.handleTCP(stream, accepted.SessionID, acceptedRoutes)
 	}
 }
 
-func (c *Client) receiveUDP(conn *quic.Conn) {
+func (s *udpSession) receive() {
 	for {
-		data, err := conn.ReceiveDatagram(conn.Context())
+		data, err := s.connection.ReceiveDatagram(s.connection.Context())
 		if err != nil {
 			return
 		}
 		packet, err := protocol.DecodeUDP(data)
-		if err != nil || packet.Response || !config.Allowed(c.config.AllowedDestinations, packet.Destination.Addr().Unmap()) {
-			c.status.Denied()
+		if err != nil || packet.Response {
+			s.client.status.DatagramDropped()
 			continue
 		}
-		flow, err := c.udpFlow(conn, packet)
+		if !config.Allowed(s.routes, packet.Destination.Addr().Unmap()) {
+			s.client.status.Denied()
+			s.client.status.DatagramDropped()
+			continue
+		}
+		flow, err := s.flow(packet)
 		if err != nil {
+			s.client.status.DatagramDropped()
 			continue
 		}
-		c.udpMu.Lock()
-		flow.lastUsed = time.Now()
-		c.udpMu.Unlock()
-		_, _ = flow.connection.Write(packet.Payload)
+		_ = flow.connection.SetReadDeadline(time.Now().Add(s.client.config.UDPIdleTimeout))
+		if _, err := flow.connection.Write(packet.Payload); err != nil {
+			s.client.status.DatagramDropped()
+		}
 	}
 }
 
-func (c *Client) udpFlow(session *quic.Conn, packet protocol.UDPDatagram) (*udpFlow, error) {
-	c.udpMu.Lock()
-	if flow := c.udp[packet.FlowID]; flow != nil {
-		c.udpMu.Unlock()
+func (s *udpSession) flow(packet protocol.UDPDatagram) (*udpFlow, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, errors.New("the UDP session is closed")
+	}
+	if flow := s.flows[packet.FlowID]; flow != nil {
+		if flow.source != packet.Source || flow.destination != packet.Destination {
+			return nil, errors.New("the UDP flow endpoints changed")
+		}
 		return flow, nil
 	}
-	c.udpMu.Unlock()
+	if int64(len(s.flows)) >= s.client.config.MaxUDPFlows {
+		return nil, errors.New("the UDP flow limit is full")
+	}
 	destination := net.UDPAddrFromAddrPort(packet.Destination)
 	connection, err := net.DialUDP("udp", nil, destination)
 	if err != nil {
 		return nil, err
 	}
-	flow := &udpFlow{connection: connection, source: packet.Source, destination: packet.Destination, lastUsed: time.Now()}
-	c.udpMu.Lock()
-	c.udp[packet.FlowID] = flow
-	c.udpMu.Unlock()
-	go c.readUDPResponses(session, packet.FlowID, flow)
+	flow := &udpFlow{connection: connection, source: packet.Source, destination: packet.Destination}
+	s.flows[packet.FlowID] = flow
+	s.client.status.UDPFlowStarted()
+	go s.readResponses(packet.FlowID, flow)
 	return flow, nil
 }
 
-func (c *Client) readUDPResponses(session *quic.Conn, flowID uint64, flow *udpFlow) {
+func (s *udpSession) readResponses(flowID uint64, flow *udpFlow) {
 	defer func() {
 		_ = flow.connection.Close()
-		c.udpMu.Lock()
-		delete(c.udp, flowID)
-		c.udpMu.Unlock()
+		s.mu.Lock()
+		if s.flows[flowID] == flow {
+			delete(s.flows, flowID)
+			s.client.status.UDPFlowEnded()
+		}
+		s.mu.Unlock()
 	}()
-	buffer := make([]byte, 64*1024)
+	buffer := make([]byte, maxUDPPayload)
 	for {
-		_ = flow.connection.SetReadDeadline(time.Now().Add(c.config.UDPIdleTimeout))
+		_ = flow.connection.SetReadDeadline(time.Now().Add(s.client.config.UDPIdleTimeout))
 		n, err := flow.connection.Read(buffer)
 		if err != nil {
 			return
 		}
 		packet, err := protocol.EncodeUDP(protocol.UDPDatagram{FlowID: flowID, Response: true, Source: flow.destination, Destination: flow.source, Payload: buffer[:n]})
-		if err != nil || session.SendDatagram(packet) != nil {
+		if err != nil {
+			s.client.status.DatagramDropped()
+			return
+		}
+		if err := s.connection.SendDatagram(packet); err != nil {
+			s.client.status.DatagramDropped()
+			var tooLarge *quic.DatagramTooLargeError
+			if errors.As(err, &tooLarge) {
+				continue
+			}
 			return
 		}
 	}
 }
 
-func (c *Client) handleTCP(stream *quic.Stream, sessionID string) {
+func (s *udpSession) close() {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	s.closed = true
+	flows := s.flows
+	s.flows = make(map[uint64]*udpFlow)
+	for _, flow := range flows {
+		_ = flow.connection.Close()
+		s.client.status.UDPFlowEnded()
+	}
+	s.mu.Unlock()
+}
+
+func (c *Client) handleTCP(stream *quic.Stream, sessionID string, routes []netip.Prefix) {
 	started := time.Now()
+	_ = stream.SetDeadline(time.Now().Add(10 * time.Second))
 	var request protocol.OpenTCP
 	if err := protocol.ReadFrame(stream, &request); err != nil {
 		stream.CancelRead(1)
 		stream.CancelWrite(1)
 		return
 	}
+	outcome := "failed"
+	errorCode := "INTERNAL_ERROR"
+	var sent, received int64
+	defer func() {
+		c.logger.Info("The TCP flow completed.", "event.name", "tcp.flow", "flow_id", request.FlowID, "session_id", sessionID, "destination", request.Destination, "bytes.sent", sent, "bytes.received", received, "duration_ms", time.Since(started).Milliseconds(), "outcome", outcome, "error.code", errorCode)
+	}()
 	carrier := propagation.MapCarrier{"traceparent": request.TraceParent, "tracestate": request.TraceState}
 	ctx := otel.GetTextMapPropagator().Extract(context.Background(), carrier)
 	ctx, span := otel.Tracer("tailbridge/connector").Start(ctx, "tcp.connect")
 	defer span.End()
 	span.SetAttributes(attribute.String("server.address", request.Destination), attribute.String("tailbridge.session.id", sessionID))
 	destination, err := netip.ParseAddrPort(request.Destination)
-	if err != nil || !config.Allowed(c.config.AllowedDestinations, destination.Addr().Unmap()) {
+	if err != nil || !config.Allowed(routes, destination.Addr().Unmap()) {
+		errorCode = "DESTINATION_DENIED"
 		c.status.Denied()
 		_ = protocol.WriteFrame(stream, protocol.OpenTCPResult{Accepted: false, Code: "DESTINATION_DENIED"})
 		_ = stream.Close()
 		return
 	}
+	deadline := time.UnixMilli(request.DeadlineUnixMS)
+	if request.DeadlineUnixMS <= 0 || !deadline.After(time.Now()) {
+		errorCode = "DEADLINE_EXCEEDED"
+		_ = protocol.WriteFrame(stream, protocol.OpenTCPResult{Accepted: false, Code: "DEADLINE_EXCEEDED"})
+		_ = stream.Close()
+		return
+	}
+	if maximum := time.Now().Add(c.config.DialTimeout); deadline.After(maximum) {
+		deadline = maximum
+	}
+	_ = stream.SetDeadline(deadline)
+	ctx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
 	dialer := net.Dialer{Timeout: c.config.DialTimeout}
 	upstream, err := dialer.DialContext(ctx, "tcp", request.Destination)
 	if err != nil {
-		_ = protocol.WriteFrame(stream, protocol.OpenTCPResult{Accepted: false, Code: "DESTINATION_UNREACHABLE"})
+		code := "DESTINATION_UNREACHABLE"
+		if errors.Is(err, context.DeadlineExceeded) {
+			code = "DEADLINE_EXCEEDED"
+		}
+		errorCode = code
+		_ = stream.SetWriteDeadline(time.Now().Add(time.Second))
+		_ = protocol.WriteFrame(stream, protocol.OpenTCPResult{Accepted: false, Code: code})
 		_ = stream.Close()
 		return
 	}
 	if err := protocol.WriteFrame(stream, protocol.OpenTCPResult{Accepted: true}); err != nil {
 		_ = upstream.Close()
+		stream.CancelRead(1)
+		stream.CancelWrite(1)
 		return
 	}
+	_ = stream.SetDeadline(time.Time{})
 	c.status.FlowStarted()
-	sent, received := proxy.Bidirectional(stream, upstream)
+	var copyErr error
+	sent, received, copyErr = proxy.Bidirectional(stream, upstream)
 	span.SetAttributes(attribute.Int64("network.io.sent", sent), attribute.Int64("network.io.received", received))
 	c.status.FlowEnded()
-	c.logger.Info("TCP flow complete", "event.name", "tcp.flow", "flow_id", request.FlowID, "session_id", sessionID, "destination", request.Destination, "bytes.sent", sent, "bytes.received", received, "duration_ms", time.Since(started).Milliseconds(), "outcome", "success")
+	if copyErr == nil {
+		outcome = "success"
+		errorCode = ""
+	} else {
+		errorCode = "COPY_FAILED"
+		span.RecordError(copyErr)
+	}
 }
 
 func wait(ctx context.Context, duration time.Duration) bool {

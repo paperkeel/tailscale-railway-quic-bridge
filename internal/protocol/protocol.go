@@ -80,7 +80,7 @@ func ReadFrame(r io.Reader, value any) error {
 	}
 	size := binary.BigEndian.Uint32(header[:])
 	if size == 0 || size > MaxControlFrame {
-		return fmt.Errorf("invalid control frame size %d", size)
+		return fmt.Errorf("The control frame size %d is not valid.", size)
 	}
 	payload := make([]byte, size)
 	if _, err := io.ReadFull(r, payload); err != nil {

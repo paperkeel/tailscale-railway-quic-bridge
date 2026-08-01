@@ -27,7 +27,29 @@ The connector is ready after the edge accepts its authenticated session.
 
 ## Metrics
 
-The Prometheus endpoint reports readiness, TCP flows, policy denials, QUIC round-trip time, byte counts, and lost bytes.
+The Prometheus endpoint reports these metrics:
+
+| Metric | Type | Description |
+|---|---|---|
+| `tailbridge_ready` | Gauge | Reports whether the component is ready. |
+| `tailbridge_tcp_flows_active` | Gauge | Reports the current active TCP flows. |
+| `tailbridge_tcp_flows_total` | Counter | Counts all TCP flows. |
+| `tailbridge_udp_flows_active` | Gauge | Reports the current active UDP flows. |
+| `tailbridge_udp_flows_total` | Counter | Counts all UDP flows. |
+| `tailbridge_udp_datagrams_dropped_total` | Counter | Counts UDP datagrams that Tailbridge drops. |
+| `tailbridge_policy_denials_total` | Counter | Counts flows that the network policy denies. |
+| `tailbridge_quic_smoothed_rtt_microseconds` | Gauge | Reports the smoothed QUIC round-trip time. |
+| `tailbridge_quic_bytes_sent` | Gauge | Reports bytes sent by the current QUIC connection. |
+| `tailbridge_quic_bytes_received` | Gauge | Reports bytes received by the current QUIC connection. |
+| `tailbridge_quic_bytes_lost` | Gauge | Reports bytes lost by the current QUIC connection. |
+
+Each Tailbridge component limits concurrent UDP flows with `TB_MAX_UDP_FLOWS`.
+
+Tailbridge drops a new datagram when the UDP flow limit is full. It increments `tailbridge_udp_datagrams_dropped_total` for the drop.
+
+Tailbridge also counts malformed datagrams, policy denials, socket errors, and QUIC send errors as drops.
+
+A QUIC send error includes a datagram that exceeds the negotiated QUIC datagram size.
 
 ## OpenTelemetry
 

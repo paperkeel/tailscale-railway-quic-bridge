@@ -3,6 +3,7 @@
 !*.env.example
 bin/
 coverage.out
+.coverage/
 dist/
 *.pem
 *.key

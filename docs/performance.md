@@ -1,67 +1,117 @@
 # Performance tests
 
-Measure Tailbridge against the actual Railway environment. Local tests cannot reproduce Railway networking.
+1. Measure Tailbridge in the actual Railway environment.
 
-Use the same client, Railway region, service, payload, and test period for each path. Stop unrelated workloads during a run.
+   Local tests cannot reproduce Railway networking.
+
+2. Use the same client, Railway region, service, payload, and test period for each path.
+
+3. Stop unrelated workloads during a test.
 
 ## Confirm the Tailscale path
 
-Run these commands on the client:
+1. Run these commands on the client:
 
-```bash
-tailscale ping tailbridge-production
-tailscale status
-tailscale netcheck
-```
+   ```bash
+   tailscale ping tailbridge-production
+   tailscale status
+   tailscale netcheck
+   ```
 
-The ping result must name the edge public address as a direct endpoint. Do not accept a DERP or peer-relay result for a Tailbridge measurement.
+2. Confirm that the ping result names the Tailbridge edge public address as a direct endpoint.
+
+3. Do not accept a DERP or peer-relay result for a Tailbridge measurement.
 
 ## Required paths
 
-Measure:
+1. Define one target for each path:
 
-1. Railway public TCP proxy.
-2. Tailscale public DERP.
-3. Tailscale peer relay, when the tailnet uses one.
-4. The complete Tailbridge path.
+| Path | Test target | Required path check |
+|---|---|---|
+| Railway public TCP proxy | `RAILWAY_PUBLIC_HOST` and `RAILWAY_PUBLIC_PORT` | The target is the Railway public proxy. |
+| Tailscale public DERP | `DERP_BASELINE_HOST` and `DERP_BASELINE_PORT` | `tailscale ping DERP_BASELINE_HOST` reports `via DERP`. |
+| Tailscale peer relay | `PEER_RELAY_HOST` and `PEER_RELAY_PORT` | `tailscale ping PEER_RELAY_HOST` reports `via peer relay`. |
+| Complete Tailbridge path | `iperf.railway.internal` and the service port | `tailscale ping tailbridge-production` reports the edge public address. |
 
-Capture the QUIC byte, loss, and round-trip metrics before and after each Tailbridge run.
+2. Set `TEST_HOST` and `TEST_PORT` to one row before each test.
+
+3. Run the required path check before each measurement.
+
+4. Run the complete TCP and UDP matrix for each available path.
+
+5. Skip the peer-relay path when the tailnet does not use a peer relay.
+
+6. Record the QUIC byte counters before and after each Tailbridge test. Use the difference as the test byte count.
+
+7. Record QUIC round-trip samples in microseconds.
+
+8. Verify that the edge and connector negotiated QUIC DATAGRAM support.
+
+9. Record `SendDatagram` failures separately from receiver-observed loss. Record `DatagramTooLargeError` failures separately from other send failures.
 
 ## TCP tests
 
-Run `iperf3` with one, four, and 32 streams. Test both directions for 30 seconds.
+1. Test the forward direction with one, four, and 32 streams:
 
-```bash
-iperf3 -c iperf.railway.internal -t 30 -P 1 --json
-iperf3 -c iperf.railway.internal -t 30 -P 4 --json
-iperf3 -c iperf.railway.internal -t 30 -P 32 --json
-iperf3 -c iperf.railway.internal -t 30 -P 4 -R --json
-```
+   ```bash
+   iperf3 -c "$TEST_HOST" -p "$TEST_PORT" -t 30 -P 1 --json
+   iperf3 -c "$TEST_HOST" -p "$TEST_PORT" -t 30 -P 4 --json
+   iperf3 -c "$TEST_HOST" -p "$TEST_PORT" -t 30 -P 32 --json
+   ```
 
-Repeat each test five times. Record the median and p95 results.
+2. Test the reverse direction with one, four, and 32 streams:
+
+   ```bash
+   iperf3 -c "$TEST_HOST" -p "$TEST_PORT" -t 30 -P 1 -R --json
+   iperf3 -c "$TEST_HOST" -p "$TEST_PORT" -t 30 -P 4 -R --json
+   iperf3 -c "$TEST_HOST" -p "$TEST_PORT" -t 30 -P 32 -R --json
+   ```
+
+3. Repeat each test five times.
+
+4. Record the median and p95 results.
 
 ## UDP tests
 
-Test 256-byte and 1,200-byte datagrams. Test 10 Mbps and 100 Mbps rates.
+1. Test all combinations in this matrix:
 
-```bash
-iperf3 -c iperf.railway.internal -u -b 10M -l 256 -t 30 --json
-iperf3 -c iperf.railway.internal -u -b 100M -l 1200 -t 30 --json
-```
+| Dimension | Values |
+|---|---|
+| Direction | Forward and reverse |
+| Datagram size | 256 and 1,200 bytes |
+| Rate | 10 and 100 Mbps |
+| Duration | 30 seconds |
 
-Record loss, jitter, CPU, memory, and QUIC round-trip time.
+2. Run these commands for each datagram size and rate:
+
+   ```bash
+   iperf3 -c "$TEST_HOST" -p "$TEST_PORT" -u -b "$TEST_RATE" -l "$DATAGRAM_SIZE" -t 30 --json
+   iperf3 -c "$TEST_HOST" -p "$TEST_PORT" -u -b "$TEST_RATE" -l "$DATAGRAM_SIZE" -t 30 -R --json
+   ```
+
+3. Repeat all eight UDP combinations five times.
+
+4. Record loss, jitter, CPU, memory, and QUIC round-trip time.
 
 ## Release targets
 
-Tailbridge should reach 70 percent of raw QUIC backhaul throughput.
+Tailbridge should reach 70 percent of raw QUIC connection throughput.
 
-It should exceed the measured public DERP throughput by at least two times.
+Tailbridge should exceed the measured public DERP throughput by at least two times.
 
-Run a one-hour load test before a stable release. Memory must remain bounded.
+UDP loss must not exceed 1 percent at 10 Mbps or 2 percent at 100 Mbps. Apply these limits to each datagram size and direction.
+
+UDP jitter must not exceed two times the Railway public proxy baseline for the same rate and datagram size.
+
+QUIC DATAGRAM send failures must be zero for application datagrams of 1,200 bytes or less. Receiver-observed loss is separate from send failures.
+
+1. Run a one-hour load test before a stable release.
+
+2. Confirm that memory use stays within the configured limits.
 
 ## Result record
 
-Store these values for each run:
+1. Store these values for each test:
 
 | Field | Value |
 |---|---|
@@ -69,10 +119,15 @@ Store these values for each run:
 | Client and edge region | Required |
 | Railway region | Required |
 | Tailscale path from `tailscale ping` | Required |
+| Protocol and direction | Required |
+| TCP stream count | Required for TCP |
+| UDP datagram size and rate | Required for UDP |
 | Round-trip time | Median and p95 |
 | TCP throughput | Median and p95 |
 | UDP loss and jitter | Median and p95 |
 | Edge and connector CPU | Peak and average |
 | Edge and connector memory | Peak and average |
 
-Publish the redacted result with each beta or stable release. Do not publish private addresses or service names.
+2. Remove private addresses and service names from the result.
+
+3. Publish the result with each beta or stable release.

@@ -3,6 +3,7 @@
 docs
 test
 coverage.out
+.coverage
 dist
 private/
 *.env

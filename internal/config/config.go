@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 type Common struct {
@@ -29,6 +30,7 @@ type Edge struct {
 	UDPListenAddr   string
 	AllowedRoutes   []netip.Prefix
 	MaxTCPFlows     int64
+	MaxUDPFlows     int64
 	UDPIdleTimeout  time.Duration
 	ManageTailscale bool
 }
@@ -38,6 +40,7 @@ type Connector struct {
 	EdgeEndpoint        string
 	AllowedDestinations []netip.Prefix
 	MaxTCPFlows         int64
+	MaxUDPFlows         int64
 	DialTimeout         time.Duration
 	ReconnectMin        time.Duration
 	ReconnectMax        time.Duration
@@ -57,6 +60,10 @@ func LoadEdge() (Edge, error) {
 	if err != nil {
 		return Edge{}, err
 	}
+	maxUDPFlows, err := int64Value("TB_MAX_UDP_FLOWS", 4096)
+	if err != nil {
+		return Edge{}, err
+	}
 	udpIdle, err := duration("TB_UDP_IDLE_TIMEOUT", 30*time.Second)
 	if err != nil {
 		return Edge{}, err
@@ -65,16 +72,28 @@ func LoadEdge() (Edge, error) {
 	if err != nil {
 		return Edge{}, err
 	}
-	return Edge{
+	edge := Edge{
 		Common:          c,
 		QUICListenAddr:  value("TB_QUIC_LISTEN_ADDR", ":4433"),
 		TCPListenAddr:   value("TB_TCP_LISTEN_ADDR", "[::]:15001"),
 		UDPListenAddr:   value("TB_UDP_LISTEN_ADDR", "[::]:15002"),
 		AllowedRoutes:   routes,
 		MaxTCPFlows:     maxFlows,
+		MaxUDPFlows:     maxUDPFlows,
 		UDPIdleTimeout:  udpIdle,
 		ManageTailscale: manageTailscale,
-	}, nil
+	}
+	for name, address := range map[string]string{
+		"TB_ADMIN_LISTEN_ADDR": edge.AdminAddr,
+		"TB_QUIC_LISTEN_ADDR":  edge.QUICListenAddr,
+		"TB_TCP_LISTEN_ADDR":   edge.TCPListenAddr,
+		"TB_UDP_LISTEN_ADDR":   edge.UDPListenAddr,
+	} {
+		if err := validateAddress(name, address, false); err != nil {
+			return Edge{}, err
+		}
+	}
+	return edge, nil
 }
 
 func LoadConnector() (Connector, error) {
@@ -82,7 +101,7 @@ func LoadConnector() (Connector, error) {
 	if port := required("PORT"); port != "" && required("TB_ADMIN_LISTEN_ADDR") == "" {
 		parsed, err := strconv.ParseUint(port, 10, 16)
 		if err != nil || parsed == 0 {
-			return Connector{}, fmt.Errorf("PORT must be a valid TCP port, got %q", port)
+			return Connector{}, fmt.Errorf("PORT must contain a valid TCP port. The value is %q.", port)
 		}
 		adminAddress = "[::]:" + port
 	}
@@ -117,18 +136,26 @@ func LoadConnector() (Connector, error) {
 	if err != nil {
 		return Connector{}, err
 	}
+	maxUDPFlows, err := int64Value("TB_MAX_UDP_FLOWS", 4096)
+	if err != nil {
+		return Connector{}, err
+	}
 	edgeEndpoint := required("TB_EDGE_ENDPOINT")
 	if edgeEndpoint == "" {
 		return Connector{}, errors.New("TB_EDGE_ENDPOINT is required")
 	}
-	if _, _, err := net.SplitHostPort(edgeEndpoint); err != nil {
-		return Connector{}, fmt.Errorf("TB_EDGE_ENDPOINT: %w", err)
+	if err := validateAddress("TB_EDGE_ENDPOINT", edgeEndpoint, true); err != nil {
+		return Connector{}, err
+	}
+	if err := validateAddress("TB_ADMIN_LISTEN_ADDR", c.AdminAddr, false); err != nil {
+		return Connector{}, err
 	}
 	return Connector{
 		Common:              c,
 		EdgeEndpoint:        edgeEndpoint,
 		AllowedDestinations: destinations,
 		MaxTCPFlows:         maxFlows,
+		MaxUDPFlows:         maxUDPFlows,
 		DialTimeout:         dialTimeout,
 		ReconnectMin:        minDelay,
 		ReconnectMax:        maxDelay,
@@ -161,12 +188,40 @@ func loadCommon(defaultAdmin string) (Common, error) {
 	if c.ConnectorID == "" || c.Environment == "" {
 		return Common{}, errors.New("TB_CONNECTOR_ID and TB_ENVIRONMENT are required")
 	}
+	if !validName(c.ConnectorID) {
+		return Common{}, errors.New("TB_CONNECTOR_ID must start with a letter or digit and contain at most 63 letters, digits, periods, underscores, or hyphens")
+	}
+	if !validName(c.Environment) {
+		return Common{}, errors.New("TB_ENVIRONMENT must start with a letter or digit and contain at most 63 letters, digits, periods, underscores, or hyphens")
+	}
+	switch c.LogLevel {
+	case "debug", "info", "warn", "error":
+	default:
+		return Common{}, fmt.Errorf("TB_LOG_LEVEL must be debug, info, warn, or error, got %q", c.LogLevel)
+	}
 	return c, nil
+}
+
+func validName(value string) bool {
+	if len(value) < 1 || len(value) > 63 || !asciiLetterOrDigit(value[0]) {
+		return false
+	}
+	for index := 1; index < len(value); index++ {
+		character := value[index]
+		if !asciiLetterOrDigit(character) && character != '.' && character != '_' && character != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+func asciiLetterOrDigit(character byte) bool {
+	return character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9'
 }
 
 func prefixes(raw string) ([]netip.Prefix, error) {
 	if strings.TrimSpace(raw) == "" {
-		return nil, errors.New("at least one CIDR is required")
+		return nil, errors.New("specify at least one CIDR")
 	}
 	parts := strings.Split(raw, ",")
 	result := make([]netip.Prefix, 0, len(parts))
@@ -187,6 +242,74 @@ func Allowed(prefixes []netip.Prefix, address netip.Addr) bool {
 		}
 	}
 	return false
+}
+
+// IntersectPrefixes returns the address ranges present in both prefix sets.
+func IntersectPrefixes(first, second []netip.Prefix) []netip.Prefix {
+	result := make([]netip.Prefix, 0)
+	for _, left := range first {
+		left = left.Masked()
+		for _, right := range second {
+			right = right.Masked()
+			if left.Addr().BitLen() != right.Addr().BitLen() || !left.Overlaps(right) {
+				continue
+			}
+			intersection := left
+			if right.Bits() > left.Bits() {
+				intersection = right
+			}
+			redundant := false
+			for _, existing := range result {
+				if existing.Bits() <= intersection.Bits() && existing.Contains(intersection.Addr()) {
+					redundant = true
+					break
+				}
+			}
+			if redundant {
+				continue
+			}
+			for index := len(result) - 1; index >= 0; index-- {
+				if intersection.Bits() <= result[index].Bits() && intersection.Contains(result[index].Addr()) {
+					result = append(result[:index], result[index+1:]...)
+				}
+			}
+			result = append(result, intersection)
+		}
+	}
+	return result
+}
+
+// ValidateAcceptedRoutes parses accepted routes and checks that each route is unique and allowed.
+func ValidateAcceptedRoutes(accepted []string, allowed []netip.Prefix) ([]netip.Prefix, error) {
+	if len(accepted) == 0 {
+		return nil, errors.New("the edge accepted no routes")
+	}
+	seen := make(map[netip.Prefix]struct{}, len(accepted))
+	result := make([]netip.Prefix, 0, len(accepted))
+	for _, raw := range accepted {
+		route, err := netip.ParsePrefix(strings.TrimSpace(raw))
+		if err != nil {
+			return nil, fmt.Errorf("accepted route %q is not a valid CIDR: %w", raw, err)
+		}
+		route = route.Masked()
+		if _, ok := seen[route]; ok {
+			return nil, fmt.Errorf("accepted route %q occurs more than once", route)
+		}
+		seen[route] = struct{}{}
+		valid := false
+		for _, candidate := range allowed {
+			candidate = candidate.Masked()
+			if candidate.Addr().BitLen() == route.Addr().BitLen() && candidate.Bits() <= route.Bits() && candidate.Contains(route.Addr()) {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			return nil, fmt.Errorf("accepted route %q is outside the allowed destinations", route)
+		}
+		result = append(result, route)
+	}
+	return result, nil
 }
 
 func decoded(name string) ([]byte, error) {
@@ -219,10 +342,30 @@ func int64Value(name string, fallback int64) (int64, error) {
 		return fallback, nil
 	}
 	parsed, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil || parsed < 1 {
-		return 0, fmt.Errorf("%s must be a positive integer", name)
+	if err != nil || parsed < 1 || parsed > 1_000_000 {
+		return 0, fmt.Errorf("%s must be an integer from 1 through 1000000", name)
 	}
 	return parsed, nil
+}
+
+func validateAddress(name, address string, requireHost bool) error {
+	if strings.IndexFunc(address, func(character rune) bool {
+		return unicode.IsSpace(character) || unicode.IsControl(character)
+	}) >= 0 {
+		return fmt.Errorf("%s must not contain whitespace or control characters", name)
+	}
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("%s must be a host and port: %w", name, err)
+	}
+	if requireHost && strings.TrimSpace(host) == "" {
+		return fmt.Errorf("%s must include a host", name)
+	}
+	parsed, err := strconv.ParseUint(port, 10, 16)
+	if err != nil || parsed == 0 {
+		return fmt.Errorf("%s must include a port from 1 through 65535", name)
+	}
+	return nil
 }
 
 func boolValue(name string, fallback bool) (bool, error) {

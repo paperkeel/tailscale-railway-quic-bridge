@@ -1,38 +1,74 @@
 package proxy
 
 import (
+	"errors"
 	"io"
 	"net"
-	"sync"
+
+	"github.com/quic-go/quic-go"
 )
 
 type closeWriter interface{ CloseWrite() error }
+type readCanceler interface{ CancelRead(quic.StreamErrorCode) }
+type writeCanceler interface{ CancelWrite(quic.StreamErrorCode) }
 
-func Bidirectional(left, right io.ReadWriteCloser) (sent, received int64) {
-	var wg sync.WaitGroup
-	wg.Add(2)
+func Bidirectional(left, right io.ReadWriteCloser) (sent, received int64, copyErr error) {
+	type result struct {
+		sent  bool
+		bytes int64
+		err   error
+	}
+	results := make(chan result, 2)
 	go func() {
-		defer wg.Done()
-		sent, _ = io.Copy(right, left)
-		closeSend(right)
+		count, err := io.Copy(right, left)
+		err = errors.Join(normalizeCopyError(err), normalizeCopyError(closeSend(right)))
+		results <- result{sent: true, bytes: count, err: err}
 	}()
 	go func() {
-		defer wg.Done()
-		received, _ = io.Copy(left, right)
-		closeSend(left)
+		count, err := io.Copy(left, right)
+		err = errors.Join(normalizeCopyError(err), normalizeCopyError(closeSend(left)))
+		results <- result{bytes: count, err: err}
 	}()
-	wg.Wait()
+	first := <-results
+	if first.err != nil {
+		forceClose(left)
+		forceClose(right)
+	}
+	second := <-results
 	_ = left.Close()
 	_ = right.Close()
-	return sent, received
+	for _, result := range []result{first, second} {
+		if result.sent {
+			sent = result.bytes
+		} else {
+			received = result.bytes
+		}
+	}
+	return sent, received, errors.Join(first.err, second.err)
 }
 
-func closeSend(connection io.ReadWriteCloser) {
-	if closer, ok := connection.(closeWriter); ok {
-		_ = closer.CloseWrite()
-		return
+func forceClose(connection io.ReadWriteCloser) {
+	if canceler, ok := connection.(readCanceler); ok {
+		canceler.CancelRead(1)
+	}
+	if canceler, ok := connection.(writeCanceler); ok {
+		canceler.CancelWrite(1)
 	}
 	_ = connection.Close()
+}
+
+func closeSend(connection io.ReadWriteCloser) error {
+	if closer, ok := connection.(closeWriter); ok {
+		return closer.CloseWrite()
+	}
+	return connection.Close()
+}
+
+func normalizeCopyError(err error) error {
+	if err == nil || errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+		return nil
+	}
+	return err
 }
 
 func Address(conn net.Conn) (source, destination string) {

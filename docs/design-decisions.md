@@ -1,16 +1,20 @@
 # Design decisions
 
-## Use a paired bridge
+## Use a Tailbridge edge and Tailbridge connector
 
 Railway does not give a service a public UDP listener. A Tailscale node in Railway can therefore fail to make a direct WireGuard path.
 
-Tailbridge puts the Tailscale node on a host with a public UDP port. The Railway component makes an outbound QUIC connection to that host. This design keeps the Tailscale client configuration unchanged.
+Tailbridge puts the Tailscale node on a host with a public UDP port.
+
+The Tailbridge connector makes an outbound QUIC connection to that host. This design keeps the Tailscale client configuration unchanged.
 
 ## Do not use a custom DERP server
 
 A custom DERP server is still a relay. It does not create a direct path to a Railway node. It also changes the DERP map for the tailnet.
 
-Tailscale recommends a peer relay when normal DERP performance is not sufficient. Tailbridge uses a different model. It advertises the Railway private subnet from a direct Tailscale edge and uses a dedicated backhaul for that subnet.
+Tailscale recommends a peer relay when the default DERP performance is not sufficient. Tailbridge uses a different model.
+
+Tailbridge advertises the Railway private subnet from a direct Tailbridge edge. It uses a dedicated QUIC connection for that subnet.
 
 See the [Tailscale DERP server documentation](https://tailscale.com/docs/reference/derp-servers).
 
@@ -26,10 +30,14 @@ See the [Cloudflare connection method guide](https://developers.cloudflare.com/l
 
 Go has maintained implementations for QUIC, TLS, Linux sockets, and OpenTelemetry. It also produces static binaries for small container images.
 
-The connector image uses a non-root distroless base. The edge image extends the official Tailscale image because it needs Tailscale, nftables, and network capabilities.
+The Tailbridge connector image uses a non-root distroless base.
 
-## Use one pair for one Railway environment
+The Tailbridge edge image extends the official Tailscale image. It needs Tailscale, nftables, and network capabilities.
 
-Railway service names resolve inside an environment. One connector can therefore reach all allowed services in that environment.
+## Use one Tailbridge edge and Tailbridge connector for one Railway environment
 
-The first release uses one active connector session. A new Railway deployment replaces the active session and drains the old session. Separate environments use separate pairs and connector identifiers.
+Railway service names resolve inside an environment. One Tailbridge connector can therefore reach all allowed services in that environment.
+
+The first release uses one active connector session. A new Railway deployment replaces the active session and drains the old session.
+
+Each environment uses a separate Tailbridge edge, Tailbridge connector, and connector identifier.

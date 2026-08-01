@@ -1,24 +1,35 @@
-# Deploy the Railway connector
+# Deploy the Tailbridge connector on Railway
 
-Create a Railway service from this repository. Set its Dockerfile to `Dockerfile.connector`.
+1. Create a Railway service from this repository.
 
-Import the values from the generated `connector.env` file as Railway variables.
+2. Set the service Dockerfile to `Dockerfile.connector`.
 
-Do not create a public domain. Do not create a TCP proxy.
+3. Import the generated `connector.env` values as Railway variables.
 
-Railway uses `/readyz` for deployment health. The connector listens on the Railway `PORT` value. It uses port `9002` when Railway does not set `PORT`.
+4. Do not create a public domain.
 
-Enable outbound IPv6 only if the selected edge endpoint needs IPv6. Railway private IPv6 works without that setting.
+5. Do not create a TCP proxy.
 
-Deploy the service. The logs must show `edge session ready`.
+6. Configure Railway to use `/readyz` for deployment health.
 
-Confirm these checks:
+   The Tailbridge connector listens on `PORT`. It uses port `9002` when Railway does not set `PORT`.
 
-1. `/readyz` returns HTTP 200 inside Railway.
-2. The edge reports one ready connector.
-3. `fd12::10` responds through the pair.
-4. A private service accepts a test connection.
+7. If the edge endpoint needs IPv6, enable outbound IPv6.
 
-The connector needs no volume. It does not join Tailscale.
+   Railway private IPv6 works without outbound IPv6.
 
-Railway can overlap a new connector with the old connector. The edge sends new flows to the newest session.
+8. Deploy the service.
+
+9. Confirm that the logs show `edge session ready`.
+
+10. Confirm that `/readyz` returns HTTP 200 inside Railway.
+
+11. Confirm that the Tailbridge edge reports one ready Tailbridge connector.
+
+12. Confirm that `fd12::10` responds through the Tailbridge edge and Tailbridge connector.
+
+13. Confirm that a private service accepts a test connection.
+
+The Tailbridge connector needs no volume. It does not join Tailscale.
+
+Railway can overlap two Tailbridge connector deployments. The Tailbridge edge sends new flows to the newest session.
