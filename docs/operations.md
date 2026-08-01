@@ -1,41 +1,67 @@
 # Operations
 
-## Upgrade the connector
+## Upgrade the Tailbridge connector
 
-Deploy an immutable connector image digest through Railway.
+1. Deploy an immutable Tailbridge connector image digest through Railway.
 
-Wait for the new deployment to pass `/readyz`. Confirm that the edge reports the new software version.
+2. Wait for the new deployment to pass `/readyz`.
 
-The old connector drains for 15 seconds. Long TCP flows can close after the drain period.
+3. Confirm that the Tailbridge edge reports the new software version.
 
-Do not restart the old deployment during the overlap. If it reconnects, the edge rejects it while the newer connector is active.
+   The old Tailbridge connector drains for 15 seconds. Long TCP flows can close after the drain period.
 
-## Upgrade the edge
+4. Do not restart the old deployment during the overlap.
 
-Record the current image digest and Tailscale machine ID.
+   The Tailbridge edge rejects the old deployment if it reconnects while the new deployment is active.
 
-Pull the new immutable image. Restart the Compose service without deleting its volume.
+## Upgrade the Tailbridge edge
 
-Confirm the same machine ID after startup. Confirm the advertised route and direct path.
+1. Record the current image digest.
+
+2. Record the Tailscale machine ID.
+
+3. Pull the new immutable Tailbridge edge image.
+
+4. Restart the Compose service without deleting its volume.
+
+5. Confirm that the Tailscale machine ID did not change.
+
+6. Confirm that the Tailscale machine advertises the expected route.
+
+7. Confirm that `tailscale ping` reports a direct path.
 
 ## Roll back
 
-Set the prior immutable image digest. Restart only the affected component.
+1. Set the prior immutable image digest.
 
-Do not replace the edge state volume.
+2. Restart only the Tailbridge component that you rolled back.
 
-## Rotate pair certificates
+3. Do not replace the Tailbridge edge state volume.
 
-Generate a new pair with the setup CLI. Keep the connector identity unchanged.
+## Rotate Tailbridge certificates
 
-Write the new pair to a new directory. The CLI refuses to replace an existing pair unless you pass `--force`.
+1. Generate new certificates with the Tailbridge CLI.
 
-Deploy matching certificates to both components during a maintenance window.
+2. Keep the connector identity unchanged.
 
-The current alpha requires a coordinated restart. Trust-bundle overlap will replace this process before version 1.0.
+3. Write the new certificates to a new directory.
+
+   The Tailbridge CLI refuses to replace existing files unless you pass `--force`.
+
+4. Deploy matching certificates to both Tailbridge components during a maintenance window.
+
+5. Restart both Tailbridge components at the same time.
+
+   The current alpha does not support trust-bundle overlap.
 
 ## Recover lost edge state
 
-Start the edge with a new tagged, preauthorized credential. The edge registers as a new Tailscale machine.
+1. Start the Tailbridge edge with a new tagged, preauthorized credential.
 
-The route auto-approver activates the advertised route. Remove the old offline machine after validation.
+   The Tailbridge edge registers as a new Tailscale machine.
+
+2. Confirm that the route auto-approver activates the advertised route.
+
+3. Validate the new Tailscale machine.
+
+4. Remove the old offline Tailscale machine.

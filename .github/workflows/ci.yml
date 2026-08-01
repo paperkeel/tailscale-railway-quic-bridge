@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  audit:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -17,11 +17,8 @@ jobs:
         with:
           go-version: "1.26.5"
           cache: true
-      - run: go test -race -coverprofile=coverage.out ./...
-      - run: go vet ./...
-      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
-      - run: test -z "$(gofmt -l .)"
-      - run: go build ./cmd/...
+      - run: make GO=go GOFMT=gofmt check
+      - run: make GO=go GOFMT=gofmt coverage
 
   containers:
     runs-on: ubuntu-latest
@@ -36,6 +33,21 @@ jobs:
           context: .
           file: Dockerfile.${{ matrix.component }}
           push: false
+          load: true
           tags: tailbridge-${{ matrix.component }}:ci
           cache-from: type=gha,scope=${{ matrix.component }}
           cache-to: type=gha,mode=max,scope=${{ matrix.component }}
+      - name: Run the CLI smoke test
+        if: matrix.component == 'cli'
+        run: docker run --rm tailbridge-cli:ci version
+      - name: Confirm the unprivileged image user
+        if: matrix.component != 'edge'
+        run: test "$(docker image inspect --format '{{.Config.User}}' tailbridge-${{ matrix.component }}:ci)" = "nonroot:nonroot"
+      - name: Run the service smoke test
+        if: matrix.component != 'cli'
+        run: |
+          set +e
+          docker run --rm tailbridge-${{ matrix.component }}:ci
+          exit_code=$?
+          set -e
+          test "$exit_code" -eq 2

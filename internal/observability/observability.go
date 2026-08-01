@@ -2,7 +2,10 @@ package observability
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"strconv"
 	"time"
@@ -20,32 +23,56 @@ type Shutdown func(context.Context) error
 
 func Setup(ctx context.Context, service, version string, logger *slog.Logger) (Shutdown, error) {
 	otel.SetTextMapPropagator(propagation.TraceContext{})
+	otelEndpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+	otelRate := 0.01
+	if otelEndpoint != "" {
+		var err error
+		otelRate, err = sampleRate("OTEL_TRACES_SAMPLER_ARG", otelRate)
+		if err != nil {
+			return nil, err
+		}
+	}
+	sentryDSN := os.Getenv("SENTRY_DSN")
+	sentryRate := 0.01
+	if sentryDSN != "" {
+		var err error
+		sentryRate, err = sampleRate("SENTRY_TRACES_SAMPLE_RATE", sentryRate)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	shutdown := func(context.Context) error { return nil }
-	if os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") != "" {
+	if otelEndpoint != "" {
 		exporter, err := otlptracehttp.New(ctx)
 		if err != nil {
 			return nil, err
 		}
-		rate := floatValue("OTEL_TRACES_SAMPLER_ARG", 0.01)
 		provider := sdktrace.NewTracerProvider(
 			sdktrace.WithBatcher(exporter),
-			sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(rate))),
+			sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(otelRate))),
 			sdktrace.WithResource(resource.NewWithAttributes("", attribute.String("service.name", service), attribute.String("service.version", version))),
 		)
 		otel.SetTracerProvider(provider)
 		shutdown = provider.Shutdown
-		logger.Info("OpenTelemetry enabled", "service", service)
+		logger.Info("Tailbridge enabled OpenTelemetry.", "service", service)
 	}
-	if dsn := os.Getenv("SENTRY_DSN"); dsn != "" {
-		if err := sentry.Init(sentry.ClientOptions{Dsn: dsn, Environment: os.Getenv("SENTRY_ENVIRONMENT"), Release: value("SENTRY_RELEASE", version), EnableTracing: true, TracesSampleRate: floatValue("SENTRY_TRACES_SAMPLE_RATE", 0.01)}); err != nil {
+	if sentryDSN != "" {
+		if err := sentry.Init(sentry.ClientOptions{Dsn: sentryDSN, Environment: os.Getenv("SENTRY_ENVIRONMENT"), Release: value("SENTRY_RELEASE", version), EnableTracing: true, TracesSampleRate: sentryRate}); err != nil {
+			shutdownContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = shutdown(shutdownContext)
 			return nil, err
 		}
 		previous := shutdown
 		shutdown = func(ctx context.Context) error {
-			sentry.Flush(2 * time.Second)
-			return previous(ctx)
+			var flushErr error
+			if !sentry.Flush(2 * time.Second) {
+				flushErr = errors.New("Sentry did not flush before the timeout")
+			}
+			return errors.Join(flushErr, previous(ctx))
 		}
-		logger.Info("Sentry enabled", "service", service)
+		logger.Info("Tailbridge enabled Sentry.", "service", service)
 	}
 	return shutdown, nil
 }
@@ -64,12 +91,16 @@ func Recover() {
 	}
 }
 
-func floatValue(name string, fallback float64) float64 {
-	value, err := strconv.ParseFloat(os.Getenv(name), 64)
-	if err != nil || value < 0 || value > 1 {
-		return fallback
+func sampleRate(name string, fallback float64) (float64, error) {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return fallback, nil
 	}
-	return value
+	value, err := strconv.ParseFloat(raw, 64)
+	if err != nil || math.IsNaN(value) || value < 0 || value > 1 {
+		return 0, fmt.Errorf("%s must be a number from 0 through 1", name)
+	}
+	return value, nil
 }
 
 func value(name, fallback string) string {

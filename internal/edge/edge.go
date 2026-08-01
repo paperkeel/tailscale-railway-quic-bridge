@@ -28,24 +28,27 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/propagation"
+	"golang.org/x/sync/errgroup"
 	"golang.org/x/sys/unix"
 )
 
 type Server struct {
-	config    config.Edge
-	logger    *slog.Logger
-	status    *status.Server
-	session   atomic.Pointer[session]
-	sessionMu sync.Mutex
-	flowID    atomic.Uint64
-	limit     chan struct{}
-	udpMu     sync.Mutex
-	udpByKey  map[string]*edgeUDPFlow
-	udpByID   map[uint64]*edgeUDPFlow
+	config      config.Edge
+	logger      *slog.Logger
+	status      *status.Server
+	session     atomic.Pointer[session]
+	sessionMu   sync.Mutex
+	connections sync.Map
+	flowID      atomic.Uint64
+	limit       chan struct{}
+	udpMu       sync.Mutex
+	udpByKey    map[string]*edgeUDPFlow
+	udpByID     map[uint64]*edgeUDPFlow
 }
 
 type edgeUDPFlow struct {
 	id          uint64
+	session     *session
 	source      *net.UDPAddr
 	destination netip.AddrPort
 	reply       *net.UDPConn
@@ -57,106 +60,215 @@ type session struct {
 	started    int64
 	connection *quic.Conn
 	draining   atomic.Bool
+	routes     []netip.Prefix
 }
+
+type networkPolicy interface {
+	Apply(context.Context) error
+	Close(context.Context) error
+}
+
+type managedProcess struct {
+	done <-chan error
+	kill func() error
+}
+
+var (
+	waitForNetwork  = netpolicy.WaitForTailscale
+	listenQUIC      = quic.ListenAddr
+	listenTCP       = transparentTCPListener
+	listenUDP       = transparentUDPListener
+	openUDPResponse = transparentUDPResponse
+	createPolicy    = func(routes []netip.Prefix, tcpAddress, udpAddress string) (networkPolicy, error) {
+		return netpolicy.New(routes, tcpAddress, udpAddress)
+	}
+	startTailscale = func(ctx context.Context, logger *slog.Logger) (*managedProcess, error) {
+		command := exec.CommandContext(ctx, "/usr/local/bin/containerboot")
+		command.Stdout = slog.NewLogLogger(logger.Handler(), slog.LevelInfo).Writer()
+		command.Stderr = slog.NewLogLogger(logger.Handler(), slog.LevelError).Writer()
+		if err := command.Start(); err != nil {
+			return nil, err
+		}
+		done := make(chan error, 1)
+		go func() { done <- command.Wait() }()
+		return &managedProcess{done: done, kill: command.Process.Kill}, nil
+	}
+)
 
 func New(cfg config.Edge, logger *slog.Logger, state *status.Server) *Server {
 	return &Server{config: cfg, logger: logger, status: state, limit: make(chan struct{}, cfg.MaxTCPFlows), udpByKey: make(map[string]*edgeUDPFlow), udpByID: make(map[uint64]*edgeUDPFlow)}
 }
 
 func (s *Server) Run(ctx context.Context) error {
+	runContext, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+	var bootDone <-chan error
+	var bootProcess *managedProcess
 	if s.config.ManageTailscale {
-		command := exec.CommandContext(ctx, "/usr/local/bin/containerboot")
-		command.Stdout = slog.NewLogLogger(s.logger.Handler(), slog.LevelInfo).Writer()
-		command.Stderr = slog.NewLogLogger(s.logger.Handler(), slog.LevelError).Writer()
-		if err := command.Start(); err != nil {
+		process, err := startTailscale(ctx, s.logger)
+		if err != nil {
 			return fmt.Errorf("start Tailscale: %w", err)
 		}
-		defer func() { _ = command.Process.Kill(); _, _ = command.Process.Wait() }()
+		bootProcess = process
+		bootDone = process.done
+		defer func() { _ = process.kill() }()
 	}
-	readyContext, cancelReady := context.WithTimeout(ctx, 60*time.Second)
+	readyContext, cancelReady := context.WithTimeout(runContext, 60*time.Second)
 	defer cancelReady()
-	if err := netpolicy.WaitForTailscale(readyContext); err != nil {
-		return fmt.Errorf("wait for tailscale0: %w", err)
+	ready := make(chan error, 1)
+	wait := waitForNetwork
+	go func() { ready <- wait(readyContext) }()
+	select {
+	case err := <-ready:
+		if err != nil {
+			return fmt.Errorf("wait for tailscale0: %w", err)
+		}
+	case err := <-bootDone:
+		return processStoppedError("Tailscale stopped before it became ready", err)
 	}
-	policy, err := netpolicy.New(s.config.AllowedRoutes, s.config.TCPListenAddr, s.config.UDPListenAddr)
+	policy, err := createPolicy(s.config.AllowedRoutes, s.config.TCPListenAddr, s.config.UDPListenAddr)
 	if err != nil {
 		return err
 	}
-	if err := policy.Apply(ctx); err != nil {
+	if err := policy.Apply(runContext); err != nil {
 		return err
 	}
-	defer policy.Close(context.Background())
+	defer func() {
+		if err := policy.Close(context.Background()); err != nil {
+			s.logger.Error("network policy cleanup failed", "error", err)
+		}
+	}()
 	tlsConfig, err := transport.ServerTLS(s.config.Common)
 	if err != nil {
 		return fmt.Errorf("configure TLS: %w", err)
 	}
-	listener, err := quic.ListenAddr(s.config.QUICListenAddr, tlsConfig, transport.QUICConfig(s.config.MaxTCPFlows))
+	listener, err := listenQUIC(s.config.QUICListenAddr, tlsConfig, transport.QUICConfig(s.config.MaxTCPFlows))
 	if err != nil {
 		return fmt.Errorf("listen for QUIC: %w", err)
 	}
 	defer listener.Close()
 
-	tcpListener, err := transparentTCPListener(s.config.TCPListenAddr)
+	tcpListener, err := listenTCP(s.config.TCPListenAddr)
 	if err != nil {
 		return fmt.Errorf("listen for transparent TCP: %w", err)
 	}
 	defer tcpListener.Close()
-	udpListener, err := transparentUDPListener(s.config.UDPListenAddr)
+	udpListener, err := listenUDP(s.config.UDPListenAddr)
 	if err != nil {
 		return fmt.Errorf("listen for transparent UDP: %w", err)
 	}
 	defer udpListener.Close()
 
-	var wg sync.WaitGroup
-	wg.Add(3)
-	go func() { defer wg.Done(); s.acceptConnectors(ctx, listener) }()
-	go func() { defer wg.Done(); s.acceptTCP(ctx, tcpListener) }()
-	go func() { defer wg.Done(); s.acceptUDP(ctx, udpListener) }()
-	<-ctx.Done()
-	_ = tcpListener.Close()
-	_ = udpListener.Close()
-	if active := s.session.Load(); active != nil {
-		_ = active.connection.CloseWithError(0, "edge shutting down")
+	group, groupContext := errgroup.WithContext(runContext)
+	group.Go(func() error { return s.acceptConnectors(groupContext, listener) })
+	group.Go(func() error { return s.acceptTCP(groupContext, tcpListener) })
+	group.Go(func() error { return s.acceptUDP(groupContext, udpListener) })
+	if bootDone != nil {
+		group.Go(func() error {
+			select {
+			case err := <-bootDone:
+				if groupContext.Err() != nil {
+					return nil
+				}
+				return processStoppedError("Tailscale stopped", err)
+			case <-groupContext.Done():
+				if bootProcess != nil {
+					_ = bootProcess.kill()
+				}
+				return nil
+			}
+		})
 	}
-	wg.Wait()
-	return nil
+	group.Go(func() error {
+		<-groupContext.Done()
+		_ = listener.Close()
+		_ = tcpListener.Close()
+		_ = udpListener.Close()
+		if active := s.session.Load(); active != nil {
+			_ = active.connection.CloseWithError(0, "edge shutting down")
+		}
+		s.connections.Range(func(key, _ any) bool {
+			_ = key.(*quic.Conn).CloseWithError(0, "edge shutting down")
+			return true
+		})
+		s.closeUDPFlows()
+		return nil
+	})
+	err = group.Wait()
+	if ctx.Err() != nil {
+		return nil
+	}
+	return err
 }
 
-func (s *Server) acceptConnectors(ctx context.Context, listener *quic.Listener) {
+func (s *Server) acceptConnectors(ctx context.Context, listener *quic.Listener) error {
 	for {
 		conn, err := listener.Accept(ctx)
 		if err != nil {
 			if ctx.Err() == nil {
 				s.logger.Error("connector accept failed", "error", err)
 			}
-			return
+			if ctx.Err() != nil {
+				return nil
+			}
+			return fmt.Errorf("accept connector: %w", err)
 		}
+		s.connections.Store(conn, struct{}{})
 		go s.authenticate(ctx, conn)
 	}
 }
 
 func (s *Server) authenticate(ctx context.Context, conn *quic.Conn) {
-	control, err := conn.AcceptStream(ctx)
+	defer s.connections.Delete(conn)
+	handshakeContext, cancelHandshake := context.WithTimeout(ctx, 10*time.Second)
+	defer cancelHandshake()
+	control, err := conn.AcceptStream(handshakeContext)
 	if err != nil {
-		_ = conn.CloseWithError(1, "missing control stream")
+		_ = conn.CloseWithError(1, "The control stream is missing.")
 		return
 	}
+	_ = control.SetDeadline(time.Now().Add(10 * time.Second))
 	var hello protocol.ConnectorHello
 	if err := protocol.ReadFrame(control, &hello); err != nil {
-		_ = conn.CloseWithError(2, "invalid hello")
+		_ = conn.CloseWithError(2, "The hello frame is not valid.")
 		return
 	}
 	if hello.ProtocolVersion != protocol.ProtocolVersion || hello.ConnectorID != s.config.ConnectorID || hello.Environment != s.config.Environment {
 		s.status.Denied()
-		_ = conn.CloseWithError(3, "connector identity rejected")
+		_ = conn.CloseWithError(3, "The edge rejected the connector identity.")
 		return
 	}
-	id := randomID()
-	routes := make([]string, 0, len(s.config.AllowedRoutes))
-	for _, route := range s.config.AllowedRoutes {
+	if hello.StartedUnixNano <= 0 || hello.StartedUnixNano > time.Now().Add(5*time.Minute).UnixNano() {
+		s.status.Denied()
+		_ = conn.CloseWithError(3, "The connector start time is not valid.")
+		return
+	}
+	advertised := make([]netip.Prefix, 0, len(hello.Routes))
+	for _, raw := range hello.Routes {
+		route, err := netip.ParsePrefix(raw)
+		if err != nil {
+			s.status.Denied()
+			_ = conn.CloseWithError(3, "The connector routes are not valid.")
+			return
+		}
+		advertised = append(advertised, route.Masked())
+	}
+	acceptedRoutes := config.IntersectPrefixes(s.config.AllowedRoutes, advertised)
+	if len(acceptedRoutes) == 0 {
+		s.status.Denied()
+		_ = conn.CloseWithError(3, "The edge and connector have no shared routes.")
+		return
+	}
+	id, err := randomID()
+	if err != nil {
+		_ = conn.CloseWithError(4, "The edge could not create a session identifier.")
+		return
+	}
+	routes := make([]string, 0, len(acceptedRoutes))
+	for _, route := range acceptedRoutes {
 		routes = append(routes, route.String())
 	}
-	next := &session{id: id, started: hello.StartedUnixNano, connection: conn}
+	next := &session{id: id, started: hello.StartedUnixNano, connection: conn, routes: acceptedRoutes}
 	s.sessionMu.Lock()
 	previous := s.session.Load()
 	if previous != nil && !connectionClosed(previous.connection) && next.started <= previous.started {
@@ -167,9 +279,10 @@ func (s *Server) authenticate(ctx context.Context, conn *quic.Conn) {
 	}
 	if err := protocol.WriteFrame(control, protocol.ConnectorAccepted{SessionID: id, Routes: routes, MaxTCPFlows: s.config.MaxTCPFlows}); err != nil {
 		s.sessionMu.Unlock()
-		_ = conn.CloseWithError(4, "hello response failed")
+		_ = conn.CloseWithError(4, "The edge could not send the hello response.")
 		return
 	}
+	_ = control.SetDeadline(time.Time{})
 	s.session.Store(next)
 	s.sessionMu.Unlock()
 	s.status.SetReady(true)
@@ -179,8 +292,13 @@ func (s *Server) authenticate(ctx context.Context, conn *quic.Conn) {
 	if previous != nil {
 		previous.draining.Store(true)
 		go func() {
-			time.Sleep(15 * time.Second)
-			_ = previous.connection.CloseWithError(0, "deployment drain complete")
+			timer := time.NewTimer(15 * time.Second)
+			defer timer.Stop()
+			select {
+			case <-ctx.Done():
+			case <-timer.C:
+				_ = previous.connection.CloseWithError(0, "The deployment drain is complete.")
+			}
 		}()
 	}
 	<-conn.Context().Done()
@@ -190,7 +308,7 @@ func (s *Server) authenticate(ctx context.Context, conn *quic.Conn) {
 	s.logger.Info("connector session closed", "event.name", "connector.session", "session_id", id, "outcome", "closed")
 }
 
-func (s *Server) acceptUDP(ctx context.Context, listener *net.UDPConn) {
+func (s *Server) acceptUDP(ctx context.Context, listener *net.UDPConn) error {
 	buffer := make([]byte, 64*1024)
 	oob := make([]byte, 256)
 	for {
@@ -199,56 +317,72 @@ func (s *Server) acceptUDP(ctx context.Context, listener *net.UDPConn) {
 			if ctx.Err() == nil {
 				s.logger.Error("UDP receive failed", "error", err)
 			}
-			return
+			if ctx.Err() != nil {
+				return nil
+			}
+			return fmt.Errorf("receive UDP: %w", err)
 		}
 		destination, err := originalUDPDestination(oob[:oobn])
 		if err != nil || !config.Allowed(s.config.AllowedRoutes, destination.Addr().Unmap()) {
 			s.status.Denied()
+			s.status.DatagramDropped()
 			continue
 		}
 		active := s.session.Load()
-		if active == nil || active.draining.Load() {
+		if active == nil || active.draining.Load() || !config.Allowed(active.routes, destination.Addr().Unmap()) {
+			s.status.DatagramDropped()
 			continue
 		}
 		sourceAddr := source.AddrPort()
-		key := sourceAddr.String() + "|" + destination.String()
-		flow, err := s.edgeUDPFlow(key, source, destination)
+		key := active.id + "|" + sourceAddr.String() + "|" + destination.String()
+		flow, err := s.edgeUDPFlow(active, key, source, destination)
 		if err != nil {
+			s.status.DatagramDropped()
 			continue
 		}
 		packet, err := protocol.EncodeUDP(protocol.UDPDatagram{FlowID: flow.id, Source: sourceAddr, Destination: destination, Payload: buffer[:n]})
 		if err == nil {
-			_ = active.connection.SendDatagram(packet)
+			if err := active.connection.SendDatagram(packet); err != nil {
+				s.status.DatagramDropped()
+			}
+		} else {
+			s.status.DatagramDropped()
 		}
 	}
 }
 
-func (s *Server) edgeUDPFlow(key string, source *net.UDPAddr, destination netip.AddrPort) (*edgeUDPFlow, error) {
+func (s *Server) edgeUDPFlow(active *session, key string, source *net.UDPAddr, destination netip.AddrPort) (*edgeUDPFlow, error) {
 	s.udpMu.Lock()
+	defer s.udpMu.Unlock()
 	if flow := s.udpByKey[key]; flow != nil {
 		flow.lastUsed = time.Now()
-		s.udpMu.Unlock()
 		return flow, nil
 	}
-	s.udpMu.Unlock()
-	reply, err := transparentUDPResponse(destination)
+	if int64(len(s.udpByID)) >= s.config.MaxUDPFlows {
+		return nil, errors.New("the UDP flow limit is full")
+	}
+	reply, err := openUDPResponse(destination)
 	if err != nil {
 		return nil, err
 	}
-	flow := &edgeUDPFlow{id: s.flowID.Add(1), source: source, destination: destination, reply: reply, lastUsed: time.Now()}
-	s.udpMu.Lock()
+	flow := &edgeUDPFlow{id: s.flowID.Add(1), session: active, source: source, destination: destination, reply: reply, lastUsed: time.Now()}
 	s.udpByKey[key] = flow
 	s.udpByID[flow.id] = flow
-	s.udpMu.Unlock()
+	s.status.UDPFlowStarted()
 	go func() {
 		ticker := time.NewTicker(s.config.UDPIdleTimeout)
 		defer ticker.Stop()
 		for range ticker.C {
 			s.udpMu.Lock()
+			if s.udpByID[flow.id] != flow {
+				s.udpMu.Unlock()
+				return
+			}
 			if time.Since(flow.lastUsed) >= s.config.UDPIdleTimeout {
 				delete(s.udpByKey, key)
 				delete(s.udpByID, flow.id)
 				_ = flow.reply.Close()
+				s.status.UDPFlowEnded()
 				s.udpMu.Unlock()
 				return
 			}
@@ -266,28 +400,37 @@ func (s *Server) receiveUDP(active *session) {
 		}
 		packet, err := protocol.DecodeUDP(data)
 		if err != nil || !packet.Response {
+			s.status.DatagramDropped()
 			continue
 		}
 		s.udpMu.Lock()
 		flow := s.udpByID[packet.FlowID]
-		if flow != nil {
+		if flow != nil && flow.session == active && packet.Source == flow.destination && packet.Destination == flow.source.AddrPort() {
 			flow.lastUsed = time.Now()
+		} else {
+			flow = nil
+			s.status.DatagramDropped()
 		}
 		s.udpMu.Unlock()
 		if flow != nil {
-			_, _ = flow.reply.WriteToUDP(packet.Payload, flow.source)
+			if _, err := flow.reply.WriteToUDP(packet.Payload, flow.source); err != nil {
+				s.status.DatagramDropped()
+			}
 		}
 	}
 }
 
-func (s *Server) acceptTCP(ctx context.Context, listener net.Listener) {
+func (s *Server) acceptTCP(ctx context.Context, listener net.Listener) error {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
 			if ctx.Err() == nil {
 				s.logger.Error("TCP accept failed", "error", err)
 			}
-			return
+			if ctx.Err() != nil {
+				return nil
+			}
+			return fmt.Errorf("accept TCP: %w", err)
 		}
 		select {
 		case s.limit <- struct{}{}:
@@ -302,48 +445,76 @@ func (s *Server) acceptTCP(ctx context.Context, listener net.Listener) {
 func (s *Server) handleTCP(ctx context.Context, client net.Conn) {
 	started := time.Now()
 	source, destination := proxy.Address(client)
+	flowID := s.flowID.Add(1)
+	outcome := "failed"
+	errorCode := "INTERNAL_ERROR"
+	sessionID := ""
+	var sent, received int64
+	defer func() {
+		s.logger.Info("The TCP flow completed.", "event.name", "tcp.flow", "flow_id", flowID, "session_id", sessionID, "destination", destination, "bytes.sent", sent, "bytes.received", received, "duration_ms", time.Since(started).Milliseconds(), "outcome", outcome, "error.code", errorCode)
+	}()
 	ctx, span := otel.Tracer("tailbridge/edge").Start(ctx, "tcp.flow")
 	defer span.End()
 	span.SetAttributes(attribute.String("network.peer.address", source), attribute.String("server.address", destination))
 	addressPort, err := netip.ParseAddrPort(destination)
 	if err != nil || !config.Allowed(s.config.AllowedRoutes, addressPort.Addr().Unmap()) {
+		errorCode = "DESTINATION_DENIED"
 		s.status.Denied()
-		s.logger.Warn("flow denied", "event.name", "tcp.flow", "destination", destination, "error.code", "DESTINATION_DENIED")
 		_ = client.Close()
 		return
 	}
 	active := s.session.Load()
-	if active == nil || active.draining.Load() {
+	if active == nil || active.draining.Load() || !config.Allowed(active.routes, addressPort.Addr().Unmap()) {
+		errorCode = "SESSION_UNAVAILABLE"
 		_ = client.Close()
 		return
 	}
-	stream, err := active.connection.OpenStreamSync(ctx)
+	sessionID = active.id
+	openContext, cancelOpen := context.WithTimeout(ctx, 10*time.Second)
+	defer cancelOpen()
+	stream, err := active.connection.OpenStreamSync(openContext)
 	if err != nil {
+		errorCode = "STREAM_UNAVAILABLE"
 		_ = client.Close()
 		return
 	}
-	flowID := s.flowID.Add(1)
+	deadline := time.Now().Add(10 * time.Second)
+	_ = stream.SetDeadline(deadline)
 	carrier := propagation.MapCarrier{}
 	otel.GetTextMapPropagator().Inject(ctx, carrier)
-	request := protocol.OpenTCP{FlowID: flowID, Source: source, Destination: destination, DeadlineUnixMS: time.Now().Add(10 * time.Second).UnixMilli(), TraceParent: carrier.Get("traceparent"), TraceState: carrier.Get("tracestate")}
+	request := protocol.OpenTCP{FlowID: flowID, Source: source, Destination: destination, DeadlineUnixMS: deadline.UnixMilli(), TraceParent: carrier.Get("traceparent"), TraceState: carrier.Get("tracestate")}
 	if err := protocol.WriteFrame(stream, request); err != nil {
+		errorCode = "CONTROL_WRITE_FAILED"
 		stream.CancelRead(1)
 		stream.CancelWrite(1)
 		_ = client.Close()
 		return
 	}
 	var result protocol.OpenTCPResult
-	if err := protocol.ReadFrame(stream, &result); err != nil || !result.Accepted {
+	err = protocol.ReadFrame(stream, &result)
+	if err != nil || !result.Accepted {
+		errorCode = "CONTROL_READ_FAILED"
+		if err == nil && result.Code != "" {
+			errorCode = result.Code
+		}
 		stream.CancelRead(2)
 		stream.CancelWrite(2)
 		_ = client.Close()
 		return
 	}
+	_ = stream.SetDeadline(time.Time{})
 	s.status.FlowStarted()
-	sent, received := proxy.Bidirectional(client, stream)
+	var copyErr error
+	sent, received, copyErr = proxy.Bidirectional(client, stream)
 	span.SetAttributes(attribute.Int64("network.io.sent", sent), attribute.Int64("network.io.received", received))
 	s.status.FlowEnded()
-	s.logger.Info("TCP flow complete", "event.name", "tcp.flow", "flow_id", flowID, "session_id", active.id, "destination", destination, "bytes.sent", sent, "bytes.received", received, "duration_ms", time.Since(started).Milliseconds(), "outcome", "success")
+	if copyErr == nil {
+		outcome = "success"
+		errorCode = ""
+	} else {
+		errorCode = "COPY_FAILED"
+		span.RecordError(copyErr)
+	}
 }
 
 func transparentTCPListener(address string) (net.Listener, error) {
@@ -448,10 +619,24 @@ func originalUDPDestination(oob []byte) (netip.AddrPort, error) {
 	return netip.AddrPort{}, errors.New("original UDP destination is missing")
 }
 
-func randomID() string {
+func randomID() (string, error) {
 	var value [12]byte
-	_, _ = rand.Read(value[:])
-	return hex.EncodeToString(value[:])
+	if _, err := rand.Read(value[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(value[:]), nil
+}
+
+func (s *Server) closeUDPFlows() {
+	s.udpMu.Lock()
+	flows := s.udpByID
+	s.udpByID = make(map[uint64]*edgeUDPFlow)
+	s.udpByKey = make(map[string]*edgeUDPFlow)
+	for _, flow := range flows {
+		_ = flow.reply.Close()
+		s.status.UDPFlowEnded()
+	}
+	s.udpMu.Unlock()
 }
 
 func connectionClosed(connection *quic.Conn) bool {
@@ -461,4 +646,11 @@ func connectionClosed(connection *quic.Conn) bool {
 	default:
 		return false
 	}
+}
+
+func processStoppedError(message string, err error) error {
+	if err == nil {
+		return errors.New(message)
+	}
+	return fmt.Errorf("%s: %w", message, err)
 }

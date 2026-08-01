@@ -4,7 +4,7 @@ Tailbridge extends a private tailnet into a Railway environment. Treat both cont
 
 ## Authentication
 
-Tailscale authenticates users and the edge. Mutual TLS authenticates the Tailbridge pair.
+Tailscale authenticates users and the edge. Mutual TLS authenticates the Tailbridge edge and connector.
 
 Each certificate contains a URI identity. The peer validates the role and connector identifier.
 

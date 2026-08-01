@@ -44,12 +44,15 @@ func EncodeUDP(packet UDPDatagram) ([]byte, error) {
 
 func DecodeUDP(data []byte) (UDPDatagram, error) {
 	if len(data) < 12 || data[0] != datagramVersion {
-		return UDPDatagram{}, errors.New("invalid UDP datagram")
+		return UDPDatagram{}, errors.New("The UDP datagram is not valid.")
+	}
+	if data[1]&^byte(1) != 0 {
+		return UDPDatagram{}, errors.New("The UDP datagram flags are not valid.")
 	}
 	sourceLength, destinationLength := int(data[10]), int(data[11])
 	headerLength := 12 + sourceLength + destinationLength
 	if sourceLength == 0 || destinationLength == 0 || headerLength > len(data) {
-		return UDPDatagram{}, errors.New("invalid UDP address lengths")
+		return UDPDatagram{}, errors.New("The UDP address lengths are not valid.")
 	}
 	var source, destination netip.AddrPort
 	if err := source.UnmarshalBinary(data[12 : 12+sourceLength]); err != nil {
