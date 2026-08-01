@@ -42,13 +42,19 @@ The Tailbridge edge and Tailbridge connector forward DNS like other UDP or TCP t
 
 ## Deployment replacement
 
-The Tailbridge edge accepts a new connector session before it drains the previous session.
+When a newer connector session becomes ready, the Tailbridge edge marks the previous session as draining.
 
-The session accepts the intersection of the edge routes and connector destinations. Both components enforce these accepted routes.
+The active session and the draining session overlap for up to 15 seconds. The Tailbridge edge then closes the draining session.
 
-New flows use the newest ready session. Existing TCP flows remain on the old session during the drain interval.
+Each connector session accepts the intersection of the edge routes and connector destinations.
 
-Existing UDP flows stay bound to the old session. The edge accepts responses only from the session that created each flow. These flows close when the old session ends.
+The Tailbridge edge and Tailbridge connector enforce the accepted routes for that session.
+
+New flows use the active session. Existing TCP flows remain on the draining session during the drain interval.
+
+Existing UDP flows stay bound to the draining session. The edge accepts responses only from the session that created each flow.
+
+The Tailbridge edge closes these UDP flows when the draining session ends.
 
 The handshake includes the Tailbridge connector process start time.
 

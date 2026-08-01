@@ -48,6 +48,7 @@ type Server struct {
 
 type edgeUDPFlow struct {
 	id          uint64
+	key         string
 	session     *session
 	source      *net.UDPAddr
 	destination netip.AddrPort
@@ -365,7 +366,7 @@ func (s *Server) edgeUDPFlow(active *session, key string, source *net.UDPAddr, d
 	if err != nil {
 		return nil, err
 	}
-	flow := &edgeUDPFlow{id: s.flowID.Add(1), session: active, source: source, destination: destination, reply: reply, lastUsed: time.Now()}
+	flow := &edgeUDPFlow{id: s.flowID.Add(1), key: key, session: active, source: source, destination: destination, reply: reply, lastUsed: time.Now()}
 	s.udpByKey[key] = flow
 	s.udpByID[flow.id] = flow
 	s.status.UDPFlowStarted()
@@ -393,6 +394,7 @@ func (s *Server) edgeUDPFlow(active *session, key string, source *net.UDPAddr, d
 }
 
 func (s *Server) receiveUDP(active *session) {
+	defer s.closeUDPSession(active)
 	for {
 		data, err := active.connection.ReceiveDatagram(active.connection.Context())
 		if err != nil {
@@ -417,6 +419,20 @@ func (s *Server) receiveUDP(active *session) {
 				s.status.DatagramDropped()
 			}
 		}
+	}
+}
+
+func (s *Server) closeUDPSession(active *session) {
+	s.udpMu.Lock()
+	defer s.udpMu.Unlock()
+	for id, flow := range s.udpByID {
+		if flow.session != active {
+			continue
+		}
+		delete(s.udpByID, id)
+		delete(s.udpByKey, flow.key)
+		_ = flow.reply.Close()
+		s.status.UDPFlowEnded()
 	}
 }
 

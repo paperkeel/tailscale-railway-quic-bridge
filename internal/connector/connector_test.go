@@ -13,7 +13,9 @@ import (
 	"log/slog"
 	"math/big"
 	"net"
+	"net/http"
 	"net/netip"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -175,7 +177,7 @@ func TestUDPResponseContinuesAfterAnOversizedDatagram(t *testing.T) {
 		close(done)
 	}()
 	peer := connection.LocalAddr().(*net.UDPAddr)
-	if _, err := backend.WriteToUDP(make([]byte, 60*1024), peer); err != nil {
+	if _, err := backend.WriteToUDP(make([]byte, maxUDPPayload), peer); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := backend.WriteToUDP([]byte("accepted"), peer); err != nil {
@@ -202,9 +204,18 @@ func TestUDPResponseContinuesAfterAnOversizedDatagram(t *testing.T) {
 	}
 }
 
-func TestUDPReceiveDropsMalformedDatagrams(t *testing.T) {
+func TestUDPReceiveClassifiesDroppedDatagrams(t *testing.T) {
 	edge, connector := testConnectorQUICPair(t)
-	session := testUDPSession(1)
+	state := status.New("test")
+	metricsAddress := startStatusServer(t, state)
+	client := testClient(config.Connector{MaxUDPFlows: 1, UDPIdleTimeout: time.Hour})
+	client.status = state
+	session := &udpSession{
+		client:     client,
+		connection: connector,
+		routes:     []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")},
+		flows:      make(map[uint64]*udpFlow),
+	}
 	session.connection = connector
 	done := make(chan struct{})
 	go func() {
@@ -214,7 +225,33 @@ func TestUDPReceiveDropsMalformedDatagrams(t *testing.T) {
 	if err := edge.SendDatagram([]byte("malformed")); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(10 * time.Millisecond)
+	response, err := protocol.EncodeUDP(protocol.UDPDatagram{
+		FlowID:      1,
+		Response:    true,
+		Source:      netip.MustParseAddrPort("192.0.2.1:53"),
+		Destination: netip.MustParseAddrPort("192.0.2.2:1000"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := edge.SendDatagram(response); err != nil {
+		t.Fatal(err)
+	}
+	denied, err := protocol.EncodeUDP(protocol.UDPDatagram{
+		FlowID:      2,
+		Source:      netip.MustParseAddrPort("192.0.2.2:1000"),
+		Destination: netip.MustParseAddrPort("192.0.2.1:53"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := edge.SendDatagram(denied); err != nil {
+		t.Fatal(err)
+	}
+	waitForMetric(t, metricsAddress, "tailbridge_udp_datagrams_dropped_total", 3)
+	if got := readMetric(t, metricsAddress, "tailbridge_policy_denials_total"); got != 1 {
+		t.Fatalf("policy denials = %d, want 1", got)
+	}
 	_ = edge.CloseWithError(0, "test complete")
 	select {
 	case <-done:
@@ -319,6 +356,82 @@ func TestHandleTCPRejectsMalformedFrames(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("handleTCP() did not reject the malformed frame")
 	}
+	if err := edgeStream.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	assertStreamError(t, func() error {
+		_, err := edgeStream.Read(make([]byte, 1))
+		return err
+	}, 1)
+	if err := edgeStream.SetWriteDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	assertEventuallyStreamError(t, func() error {
+		_, err := edgeStream.Write([]byte("test"))
+		return err
+	}, 1)
+}
+
+func TestHandleTCPCancelsStreamWhenAcceptedResponseFails(t *testing.T) {
+	var listenConfig net.ListenConfig
+	upstream, err := listenConfig.Listen(t.Context(), "tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = upstream.Close() })
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		connection, err := upstream.Accept()
+		if err == nil {
+			accepted <- connection
+		}
+	}()
+
+	edge, connector := testConnectorQUICPair(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	t.Cleanup(cancel)
+	edgeStream, err := edge.OpenStreamSync(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edgeStream.CancelRead(9)
+	if err := protocol.WriteFrame(edgeStream, protocol.OpenTCP{
+		Destination:    upstream.Addr().String(),
+		DeadlineUnixMS: time.Now().Add(time.Second).UnixMilli(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	connectorStream, err := connector.AcceptStream(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handled := make(chan struct{})
+	go func() {
+		testClient(config.Connector{DialTimeout: time.Second}).handleTCP(
+			connectorStream,
+			"test-session",
+			[]netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")},
+		)
+		close(handled)
+	}()
+	select {
+	case connection := <-accepted:
+		t.Cleanup(func() { _ = connection.Close() })
+	case <-ctx.Done():
+		t.Fatal("the connector did not reach the upstream service")
+	}
+	select {
+	case <-handled:
+	case <-ctx.Done():
+		t.Fatal("handleTCP() did not stop after the response failed")
+	}
+	if err := edgeStream.SetWriteDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	assertEventuallyStreamError(t, func() error {
+		_, err := edgeStream.Write([]byte("test"))
+		return err
+	}, 1)
 }
 
 func TestHandleTCPReportsAnUnreachableDestination(t *testing.T) {
@@ -407,6 +520,105 @@ func testUDPSession(maxFlows int64) *udpSession {
 
 func testClient(cfg config.Connector) *Client {
 	return New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), status.New("test"), "test")
+}
+
+func startStatusServer(t *testing.T, state *status.Server) string {
+	t.Helper()
+	address := unusedTCPAddress(t)
+	listener, err := state.Listen(address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- listener.Serve(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("stop status server: %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Error("the status server did not stop")
+		}
+	})
+	return address
+}
+
+func waitForMetric(t *testing.T, address, name string, want uint64) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if readMetric(t, address, name) == want {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("metric %s did not reach %d", name, want)
+}
+
+func readMetric(t *testing.T, address, name string) uint64 {
+	t.Helper()
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://"+address+"/metrics", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := (&http.Client{Timeout: time.Second}).Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(body), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 || fields[0] != name {
+			continue
+		}
+		value, err := strconv.ParseUint(fields[1], 10, 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return value
+	}
+	t.Fatalf("metric %s is missing", name)
+	return 0
+}
+
+func assertStreamError(t *testing.T, operation func() error, code quic.StreamErrorCode) {
+	t.Helper()
+	err := operation()
+	var streamError *quic.StreamError
+	if !errors.As(err, &streamError) {
+		t.Fatalf("stream error = %v", err)
+	}
+	if streamError.ErrorCode != code {
+		t.Fatalf("stream error code = %d, want %d", streamError.ErrorCode, code)
+	}
+}
+
+func assertEventuallyStreamError(t *testing.T, operation func() error, code quic.StreamErrorCode) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		err := operation()
+		if err == nil {
+			time.Sleep(time.Millisecond)
+			continue
+		}
+		var streamError *quic.StreamError
+		if !errors.As(err, &streamError) {
+			t.Fatalf("stream error = %v", err)
+		}
+		if streamError.ErrorCode != code {
+			t.Fatalf("stream error code = %d, want %d", streamError.ErrorCode, code)
+		}
+		return
+	}
+	t.Fatal("the peer did not cancel the stream")
 }
 
 func runTCPRequest(t *testing.T, edge, connector *quic.Conn, client *Client, routes []netip.Prefix, request protocol.OpenTCP) protocol.OpenTCPResult {

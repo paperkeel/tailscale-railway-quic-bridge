@@ -145,6 +145,8 @@ The firewall permits UDP `41641` and `4433`. It permits SSH only from `ssh_sourc
 
    An ephemeral credential cannot preserve the identity after state loss.
 
-3. If your recovery process stores the credential, remove `TS_AUTHKEY` after the first successful start.
+3. Store a tagged, preauthorized, non-ephemeral credential in your recovery system.
+
+4. Remove `TS_AUTHKEY` after the first successful start.
 
    The credential registers a node only when the state directory has no valid identity.

@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/quic-go/quic-go"
 )
 
 type testConnection struct {
@@ -109,6 +111,41 @@ func TestBidirectionalUnblocksTheOtherCopyAfterAnError(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("Bidirectional() remained blocked after a copy error")
+	}
+}
+
+type cancelableBlockingConnection struct {
+	blockingConnection
+	readCanceled  atomic.Bool
+	writeCanceled atomic.Bool
+}
+
+func (c *cancelableBlockingConnection) Close() error { return nil }
+func (c *cancelableBlockingConnection) CancelRead(quic.StreamErrorCode) {
+	c.readCanceled.Store(true)
+	c.once.Do(func() { close(c.closed) })
+}
+func (c *cancelableBlockingConnection) CancelWrite(quic.StreamErrorCode) {
+	c.writeCanceled.Store(true)
+}
+
+func TestBidirectionalCancelsAQUICStyleStreamAfterAnError(t *testing.T) {
+	blocked := &cancelableBlockingConnection{blockingConnection: blockingConnection{closed: make(chan struct{})}}
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := Bidirectional(&errorConnection{}, blocked)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Bidirectional() did not report the copy error")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Bidirectional() did not cancel the blocked stream")
+	}
+	if !blocked.readCanceled.Load() || !blocked.writeCanceled.Load() {
+		t.Fatal("Bidirectional() did not cancel both stream directions")
 	}
 }
 

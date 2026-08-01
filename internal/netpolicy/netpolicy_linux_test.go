@@ -170,6 +170,47 @@ func TestCloseCleansAllPolicyStateAndReturnsErrors(t *testing.T) {
 	}
 }
 
+func TestCleanupIgnoresAbsentPolicyObjects(t *testing.T) {
+	policy := testPolicy(t)
+	var calls []commandCall
+	policy.run = func(_ context.Context, name string, args []string, stdin string) error {
+		calls = append(calls, commandCall{name: name, args: append([]string(nil), args...), stdin: stdin})
+		output := "RTNETLINK answers: No such file or directory"
+		if len(args) > 1 && args[1] == "route" {
+			output = "Error: ipv4: FIB table does not exist."
+		}
+		return &commandError{name: name, err: errors.New("exit status 2"), output: output}
+	}
+
+	if err := policy.Close(context.Background()); err != nil {
+		t.Fatalf("Close() error = %v, want nil", err)
+	}
+	if want := cleanupCalls(); !reflect.DeepEqual(calls, want) {
+		t.Fatalf("Close() calls = %#v, want %#v", calls, want)
+	}
+}
+
+func TestApplyReturnsGenuinePreCleanErrors(t *testing.T) {
+	policy := testPolicy(t)
+	cleanupErr := errors.New("permission denied")
+	callCount := 0
+	policy.run = func(context.Context, string, []string, string) error {
+		callCount++
+		if callCount == 1 {
+			return cleanupErr
+		}
+		return nil
+	}
+
+	err := policy.Apply(context.Background())
+	if !errors.Is(err, cleanupErr) {
+		t.Fatalf("Apply() error = %v, want %v", err, cleanupErr)
+	}
+	if callCount != len(cleanupCalls()) {
+		t.Fatalf("Apply() made %d calls, want %d cleanup calls", callCount, len(cleanupCalls()))
+	}
+}
+
 func TestWaitForTailscale(t *testing.T) {
 	calls := 0
 	err := waitForTailscale(context.Background(), func(name string) (*net.Interface, error) {

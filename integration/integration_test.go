@@ -99,6 +99,7 @@ func TestBridgeIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitForUDP(t, udpPayload, 10*time.Second)
+	assertOversizedUDPRejected(t)
 	if err := exchangeTCPAt("fd42:200::3", []byte("denied route")); err == nil {
 		t.Fatal("TCP reached a route that the connector did not advertise")
 	}
@@ -164,6 +165,7 @@ func TestIntegrationHelper(t *testing.T) {
 
 type helperProcess struct {
 	command *exec.Cmd
+	cancel  context.CancelFunc
 	output  *lockedBuffer
 	done    chan error
 	mu      sync.Mutex
@@ -180,7 +182,8 @@ func startHelper(t *testing.T, namespace, mode string, cfg any, profile string) 
 	if directory := os.Getenv("TB_COVERAGE_DIR"); directory != "" {
 		args = append(args, "-test.coverprofile="+filepath.Join(directory, "coverage."+profile+".out"))
 	}
-	command := exec.Command("ip", args...)
+	commandContext, cancelCommand := context.WithTimeout(context.Background(), 2*time.Minute)
+	command := exec.CommandContext(commandContext, "ip", args...)
 	command.Env = append(os.Environ(), "TB_INTEGRATION_HELPER="+mode)
 	if cfg != nil {
 		encoded, err := json.Marshal(cfg)
@@ -193,9 +196,10 @@ func startHelper(t *testing.T, namespace, mode string, cfg any, profile string) 
 	command.Stdout = output
 	command.Stderr = output
 	if err := command.Start(); err != nil {
+		cancelCommand()
 		t.Fatal(err)
 	}
-	process := &helperProcess{command: command, output: output, done: make(chan error, 1)}
+	process := &helperProcess{command: command, cancel: cancelCommand, output: output, done: make(chan error, 1)}
 	go func() { process.done <- command.Wait() }()
 	t.Cleanup(func() { process.stop(t) })
 	return process
@@ -215,10 +219,12 @@ func (p *helperProcess) stop(t *testing.T) {
 	}
 	select {
 	case err := <-p.done:
+		p.cancel()
 		if err != nil {
 			t.Errorf("helper failed: %v\n%s", err, p.output.String())
 		}
 	case <-time.After(10 * time.Second):
+		p.cancel()
 		_ = p.command.Process.Kill()
 		t.Errorf("helper did not stop\n%s", p.output.String())
 	}
@@ -454,6 +460,23 @@ func exchangeUDP(payload []byte) error {
 	return nil
 }
 
+func assertOversizedUDPRejected(t *testing.T) {
+	t.Helper()
+	address, err := net.ResolveUDPAddr("udp6", net.JoinHostPort(serviceAddress, fmt.Sprint(servicePort)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection, err := net.DialUDP("udp6", nil, address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	_ = connection.SetWriteDeadline(time.Now().Add(2 * time.Second))
+	if _, err := connection.Write(make([]byte, 1<<16)); err == nil {
+		t.Fatal("the UDP socket accepted a 65,536-byte datagram")
+	}
+}
+
 func stressUDP(t *testing.T, datagrams int, timeout time.Duration) {
 	t.Helper()
 	address, err := net.ResolveUDPAddr("udp6", net.JoinHostPort(serviceAddress, fmt.Sprint(servicePort)))
@@ -641,18 +664,24 @@ func assertResourceCleanup(t *testing.T, baselineGoroutines, baselineDescriptors
 
 func run(t *testing.T, name string, args ...string) {
 	t.Helper()
-	if data, err := exec.Command(name, args...).CombinedOutput(); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if data, err := exec.CommandContext(ctx, name, args...).CombinedOutput(); err != nil {
 		t.Fatalf("%s failed: %v: %s", name, err, bytes.TrimSpace(data))
 	}
 }
 
 func runError(name string, args ...string) error {
-	return exec.Command(name, args...).Run()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return exec.CommandContext(ctx, name, args...).Run()
 }
 
 func output(t *testing.T, name string, args ...string) string {
 	t.Helper()
-	data, err := exec.Command(name, args...).CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	data, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
 	if err != nil {
 		t.Fatalf("%s failed: %v: %s", name, err, bytes.TrimSpace(data))
 	}

@@ -45,6 +45,8 @@ type udpSession struct {
 	closed     bool
 }
 
+const maxUDPPayload = 8 * 1024
+
 func New(cfg config.Connector, logger *slog.Logger, state *status.Server, version string) *Client {
 	return &Client{config: cfg, logger: logger, status: state, version: version, started: time.Now().UnixNano()}
 }
@@ -134,7 +136,11 @@ func (s *udpSession) receive() {
 			return
 		}
 		packet, err := protocol.DecodeUDP(data)
-		if err != nil || packet.Response || !config.Allowed(s.routes, packet.Destination.Addr().Unmap()) {
+		if err != nil || packet.Response {
+			s.client.status.DatagramDropped()
+			continue
+		}
+		if !config.Allowed(s.routes, packet.Destination.Addr().Unmap()) {
 			s.client.status.Denied()
 			s.client.status.DatagramDropped()
 			continue
@@ -188,7 +194,7 @@ func (s *udpSession) readResponses(flowID uint64, flow *udpFlow) {
 		}
 		s.mu.Unlock()
 	}()
-	buffer := make([]byte, 64*1024)
+	buffer := make([]byte, maxUDPPayload)
 	for {
 		_ = flow.connection.SetReadDeadline(time.Now().Add(s.client.config.UDPIdleTimeout))
 		n, err := flow.connection.Read(buffer)
@@ -283,6 +289,8 @@ func (c *Client) handleTCP(stream *quic.Stream, sessionID string, routes []netip
 	}
 	if err := protocol.WriteFrame(stream, protocol.OpenTCPResult{Accepted: true}); err != nil {
 		_ = upstream.Close()
+		stream.CancelRead(1)
+		stream.CancelWrite(1)
 		return
 	}
 	_ = stream.SetDeadline(time.Time{})

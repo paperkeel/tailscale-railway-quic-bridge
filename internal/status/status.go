@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -24,7 +25,8 @@ type Server struct {
 	quicSent     atomic.Uint64
 	quicReceived atomic.Uint64
 	quicLost     atomic.Uint64
-	quicObserver atomic.Uint64
+	quicMu       sync.Mutex
+	quicObserver uint64
 	version      string
 }
 
@@ -42,37 +44,57 @@ type Listener struct {
 	server   *http.Server
 }
 
+func (l *Listener) Close() error {
+	return l.listener.Close()
+}
+
 func (s *Server) ObserveQUIC(ctxDone <-chan struct{}, connection *quic.Conn) {
-	observer := s.quicObserver.Add(1)
-	s.quicRTT.Store(0)
-	s.quicSent.Store(0)
-	s.quicReceived.Store(0)
-	s.quicLost.Store(0)
+	s.quicMu.Lock()
+	s.quicObserver++
+	observer := s.quicObserver
+	s.resetQUICMetrics()
+	s.quicMu.Unlock()
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	defer func() {
-		if s.quicObserver.CompareAndSwap(observer, observer+1) {
-			s.quicRTT.Store(0)
-			s.quicSent.Store(0)
-			s.quicReceived.Store(0)
-			s.quicLost.Store(0)
+		s.quicMu.Lock()
+		if s.quicObserver == observer {
+			s.quicObserver++
+			s.resetQUICMetrics()
 		}
+		s.quicMu.Unlock()
 	}()
 	for {
 		select {
 		case <-ctxDone:
 			return
 		case <-ticker.C:
-			if s.quicObserver.Load() != observer {
+			stats := connection.ConnectionStats()
+			if !s.storeQUICStats(observer, stats) {
 				return
 			}
-			stats := connection.ConnectionStats()
-			s.quicRTT.Store(stats.SmoothedRTT.Microseconds())
-			s.quicSent.Store(stats.BytesSent)
-			s.quicReceived.Store(stats.BytesReceived)
-			s.quicLost.Store(stats.BytesLost)
 		}
 	}
+}
+
+func (s *Server) storeQUICStats(observer uint64, stats quic.ConnectionStats) bool {
+	s.quicMu.Lock()
+	defer s.quicMu.Unlock()
+	if s.quicObserver != observer {
+		return false
+	}
+	s.quicRTT.Store(stats.SmoothedRTT.Microseconds())
+	s.quicSent.Store(stats.BytesSent)
+	s.quicReceived.Store(stats.BytesReceived)
+	s.quicLost.Store(stats.BytesLost)
+	return true
+}
+
+func (s *Server) resetQUICMetrics() {
+	s.quicRTT.Store(0)
+	s.quicSent.Store(0)
+	s.quicReceived.Store(0)
+	s.quicLost.Store(0)
 }
 
 func (s *Server) Listen(addr string) (*Listener, error) {
@@ -130,7 +152,8 @@ tailbridge_quic_bytes_received %d
 tailbridge_quic_bytes_lost %d
 `, ready, s.active.Load(), s.flows.Load(), s.udpActive.Load(), s.udpFlows.Load(), s.udpDropped.Load(), s.denied.Load(), s.quicRTT.Load(), s.quicSent.Load(), s.quicReceived.Load(), s.quicLost.Load())
 	}))
-	listener, err := net.Listen("tcp", addr)
+	var listenConfig net.ListenConfig
+	listener, err := listenConfig.Listen(context.Background(), "tcp", addr)
 	if err != nil {
 		return nil, err
 	}

@@ -23,11 +23,17 @@ func TestRunExitCodes(t *testing.T) {
 	if code := run([]string{"tailbridge", "version"}); code != 0 {
 		t.Fatalf("run() = %d, want 0 for version", code)
 	}
+	if code := run([]string{"tailbridge", "version", "extra"}); code != 2 {
+		t.Fatalf("run() = %d, want 2 for unexpected version arguments", code)
+	}
 	if code := run([]string{"tailbridge", "init", "--help"}); code != 0 {
 		t.Fatalf("run() = %d, want 0 for init help", code)
 	}
 	if code := run([]string{"tailbridge", "init", "--unknown"}); code != 2 {
 		t.Fatalf("run() = %d, want 2 for invalid init flags", code)
+	}
+	if code := run([]string{"tailbridge", "init", "extra"}); code != 2 {
+		t.Fatalf("run() = %d, want 2 for unexpected init arguments", code)
 	}
 }
 
@@ -284,6 +290,18 @@ func TestInitializeForceRestoresAllFilesAfterFailure(t *testing.T) {
 	}
 	assertGeneratedFiles(t, directory, original)
 	assertNoWorkFiles(t, directory)
+}
+
+func TestCleanupTempsReportsRemovalFailure(t *testing.T) {
+	originalRemove := removeFile
+	removeErr := errors.New("injected remove failure")
+	removeFile = func(string) error { return removeErr }
+	t.Cleanup(func() { removeFile = originalRemove })
+
+	err := cleanupTemps([]secretFile{{path: "edge.env", temp: ".edge.env.tmp-test"}})
+	if !errors.Is(err, removeErr) {
+		t.Fatalf("cleanupTemps() error = %v, want the removal error", err)
+	}
 }
 
 var errRandomness = errors.New("randomness failed")

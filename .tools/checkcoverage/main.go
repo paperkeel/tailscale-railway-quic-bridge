@@ -72,7 +72,7 @@ func main() {
 	failed := false
 	strict := map[string]bool{
 		"internal/config": true, "internal/protocol": true, "internal/transport": true,
-		"internal/connector": true, "internal/edge": true, "internal/proxy": true,
+		"internal/connector": true, "internal/edge": true, "internal/netpolicy": true, "internal/proxy": true,
 		"internal/status": true,
 	}
 	for _, name := range names {

@@ -634,6 +634,67 @@ func TestEdgeUDPFlowCreationReuseExpiryAndFailure(t *testing.T) {
 	}
 }
 
+func TestCloseUDPSessionReleasesOnlyOwnedFlows(t *testing.T) {
+	server := testServer(2)
+	firstSession := &session{id: "first"}
+	secondSession := &session{id: "second"}
+	firstReply, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondReply, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := &edgeUDPFlow{id: 2, key: "second", session: secondSession, reply: secondReply}
+	server.udpByID[1] = &edgeUDPFlow{id: 1, key: "first", session: firstSession, reply: firstReply}
+	server.udpByID[2] = second
+	server.udpByKey["first"] = server.udpByID[1]
+	server.udpByKey["second"] = second
+	server.status.UDPFlowStarted()
+	server.status.UDPFlowStarted()
+
+	server.closeUDPSession(firstSession)
+	if len(server.udpByID) != 1 || len(server.udpByKey) != 1 || server.udpByID[2] != second || server.udpByKey["second"] != second {
+		t.Fatal("closeUDPSession() changed a flow from another session")
+	}
+	if err := firstReply.SetReadDeadline(time.Now()); err == nil {
+		t.Fatal("closeUDPSession() left the owned response socket open")
+	}
+	if err := secondReply.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("closeUDPSession() closed another session's response socket: %v", err)
+	}
+	server.closeUDPSession(secondSession)
+}
+
+func TestCloseUDPFlowsReleasesAllResponseSockets(t *testing.T) {
+	server := testServer(2)
+	first, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.udpByID[1] = &edgeUDPFlow{id: 1, reply: first}
+	server.udpByID[2] = &edgeUDPFlow{id: 2, reply: second}
+	server.udpByKey["first"] = server.udpByID[1]
+	server.udpByKey["second"] = server.udpByID[2]
+	server.status.UDPFlowStarted()
+	server.status.UDPFlowStarted()
+
+	server.closeUDPFlows()
+	if len(server.udpByID) != 0 || len(server.udpByKey) != 0 {
+		t.Fatal("closeUDPFlows() kept flow state")
+	}
+	for _, connection := range []*net.UDPConn{first, second} {
+		if err := connection.SetReadDeadline(time.Now()); err == nil {
+			t.Fatal("closeUDPFlows() left a response socket open")
+		}
+	}
+}
+
 func TestReceiveUDPValidatesExactEndpoints(t *testing.T) {
 	client, connection, cleanup := testQUICPair(t)
 	defer cleanup()

@@ -20,6 +20,10 @@ Generated environment files contain private keys. Store them with mode `0600`.
 
 Do not commit environment files. Do not place secrets in image build arguments.
 
+The recovery process requires a tagged, preauthorized, non-ephemeral Tailscale credential.
+
+An ephemeral credential cannot restore a stable Tailscale machine identity.
+
 ## Exposure
 
 Expose only UDP `41641` and `4433` on the edge. Keep administration endpoints private.

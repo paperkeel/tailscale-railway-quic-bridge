@@ -94,4 +94,6 @@ SENTRY_TRACES_SAMPLE_RATE
 
 Tailbridge disables Sentry when the DSN is empty.
 
-When you enable Sentry, `SENTRY_TRACES_SAMPLE_RATE` must contain a number from `0` through `1`.
+`SENTRY_TRACES_SAMPLE_RATE` is optional when you enable Sentry. Its default value is `0.01`.
+
+If you set `SENTRY_TRACES_SAMPLE_RATE`, use a number from `0` through `1`.

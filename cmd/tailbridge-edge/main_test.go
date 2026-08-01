@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -21,11 +22,15 @@ func TestRunReturnsConfigurationExitCode(t *testing.T) {
 }
 
 func TestRunReturnsConfigurationExitCodeWhenAdminAddressIsOccupied(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer listener.Close()
+	t.Cleanup(func() {
+		if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			t.Errorf("close occupied listener: %v", err)
+		}
+	})
 	setValidEdgeEnvironment(t, listener.Addr().String())
 
 	if code := run(context.Background()); code != 2 {

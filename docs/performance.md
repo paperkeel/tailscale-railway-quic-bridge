@@ -37,15 +37,17 @@
 
 3. Run the required path check before each measurement.
 
-4. Skip the peer-relay path when the tailnet does not use a peer relay.
+4. Run the complete TCP and UDP matrix for each available path.
 
-5. Record the QUIC byte counters before and after each Tailbridge test. Use the difference as the test byte count.
+5. Skip the peer-relay path when the tailnet does not use a peer relay.
 
-6. Record QUIC round-trip samples in microseconds.
+6. Record the QUIC byte counters before and after each Tailbridge test. Use the difference as the test byte count.
 
-7. Verify that the edge and connector negotiated QUIC DATAGRAM support.
+7. Record QUIC round-trip samples in microseconds.
 
-8. Record `SendDatagram` failures separately from receiver-observed loss. Record `DatagramTooLargeError` failures separately from other send failures.
+8. Verify that the edge and connector negotiated QUIC DATAGRAM support.
+
+9. Record `SendDatagram` failures separately from receiver-observed loss. Record `DatagramTooLargeError` failures separately from other send failures.
 
 ## TCP tests
 
@@ -57,10 +59,12 @@
    iperf3 -c "$TEST_HOST" -p "$TEST_PORT" -t 30 -P 32 --json
    ```
 
-2. Test the reverse direction with four streams:
+2. Test the reverse direction with one, four, and 32 streams:
 
    ```bash
+   iperf3 -c "$TEST_HOST" -p "$TEST_PORT" -t 30 -P 1 -R --json
    iperf3 -c "$TEST_HOST" -p "$TEST_PORT" -t 30 -P 4 -R --json
+   iperf3 -c "$TEST_HOST" -p "$TEST_PORT" -t 30 -P 32 -R --json
    ```
 
 3. Repeat each test five times.
@@ -69,16 +73,25 @@
 
 ## UDP tests
 
-1. Test 256-byte and 1,200-byte datagrams.
+1. Test all combinations in this matrix:
 
-2. Test rates of 10 Mbps and 100 Mbps:
+| Dimension | Values |
+|---|---|
+| Direction | Forward and reverse |
+| Datagram size | 256 and 1,200 bytes |
+| Rate | 10 and 100 Mbps |
+| Duration | 30 seconds |
+
+2. Run these commands for each datagram size and rate:
 
    ```bash
-   iperf3 -c "$TEST_HOST" -p "$TEST_PORT" -u -b 10M -l 256 -t 30 --json
-   iperf3 -c "$TEST_HOST" -p "$TEST_PORT" -u -b 100M -l 1200 -t 30 --json
+   iperf3 -c "$TEST_HOST" -p "$TEST_PORT" -u -b "$TEST_RATE" -l "$DATAGRAM_SIZE" -t 30 --json
+   iperf3 -c "$TEST_HOST" -p "$TEST_PORT" -u -b "$TEST_RATE" -l "$DATAGRAM_SIZE" -t 30 -R --json
    ```
 
-3. Record loss, jitter, CPU, memory, and QUIC round-trip time.
+3. Repeat all eight UDP combinations five times.
+
+4. Record loss, jitter, CPU, memory, and QUIC round-trip time.
 
 ## Release targets
 
@@ -106,6 +119,9 @@ QUIC DATAGRAM send failures must be zero for application datagrams of 1,200 byte
 | Client and edge region | Required |
 | Railway region | Required |
 | Tailscale path from `tailscale ping` | Required |
+| Protocol and direction | Required |
+| TCP stream count | Required for TCP |
+| UDP datagram size and rate | Required for UDP |
 | Round-trip time | Median and p95 |
 | TCP throughput | Median and p95 |
 | UDP loss and jitter | Median and p95 |

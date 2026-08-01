@@ -25,6 +25,23 @@ const (
 
 type commandRunner func(context.Context, string, []string, string) error
 
+type commandError struct {
+	name   string
+	err    error
+	output string
+}
+
+func (e *commandError) Error() string {
+	if e.output == "" {
+		return fmt.Sprintf("%s command failed: %v", e.name, e.err)
+	}
+	return fmt.Sprintf("%s command failed: %v: %s", e.name, e.err, e.output)
+}
+
+func (e *commandError) Unwrap() error {
+	return e.err
+}
+
 type Policy struct {
 	routes  []netip.Prefix
 	tcpPort string
@@ -45,7 +62,9 @@ func New(routes []netip.Prefix, tcpAddress, udpAddress string) (*Policy, error) 
 }
 
 func (p *Policy) Apply(ctx context.Context) error {
-	_ = p.cleanup(ctx)
+	if err := p.cleanup(ctx); err != nil {
+		return fmt.Errorf("clean the existing network policy: %w", err)
+	}
 	if err := p.run(ctx, "nft", []string{"-f", "-"}, p.rules()); err != nil {
 		return p.rollback(ctx, fmt.Errorf("apply nftables rules: %w", err))
 	}
@@ -76,17 +95,26 @@ func (p *Policy) rollback(ctx context.Context, applyErr error) error {
 func (p *Policy) cleanup(ctx context.Context) error {
 	var cleanupErrors []error
 	for _, family := range []string{"-6", "-4"} {
-		if err := p.run(ctx, "ip", []string{family, "route", "flush", "table", routeTable}, ""); err != nil {
+		if err := p.run(ctx, "ip", []string{family, "route", "flush", "table", routeTable}, ""); err != nil && !policyObjectAbsent(err) {
 			cleanupErrors = append(cleanupErrors, err)
 		}
-		if err := p.run(ctx, "ip", []string{family, "rule", "del", "fwmark", packetMark, "lookup", routeTable}, ""); err != nil {
+		if err := p.run(ctx, "ip", []string{family, "rule", "del", "fwmark", packetMark, "lookup", routeTable}, ""); err != nil && !policyObjectAbsent(err) {
 			cleanupErrors = append(cleanupErrors, err)
 		}
 	}
-	if err := p.run(ctx, "nft", []string{"delete", "table", "inet", tableName}, ""); err != nil {
+	if err := p.run(ctx, "nft", []string{"delete", "table", "inet", tableName}, ""); err != nil && !policyObjectAbsent(err) {
 		cleanupErrors = append(cleanupErrors, err)
 	}
 	return errors.Join(cleanupErrors...)
+}
+
+func policyObjectAbsent(err error) bool {
+	var commandErr *commandError
+	if !errors.As(err, &commandErr) {
+		return false
+	}
+	output := strings.ToLower(commandErr.output)
+	return strings.Contains(output, "no such file or directory") || strings.Contains(output, "fib table does not exist")
 }
 
 func (p *Policy) rules() string {
@@ -139,7 +167,7 @@ func runCommand(ctx context.Context, name string, args []string, stdin string) e
 	}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("%s command failed: %w: %s", name, err, bytes.TrimSpace(output))
+		return &commandError{name: name, err: err, output: string(bytes.TrimSpace(output))}
 	}
 	return nil
 }

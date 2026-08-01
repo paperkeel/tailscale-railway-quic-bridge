@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/quic-go/quic-go"
 )
 
 func TestListenerServesStatusAndStopsWithContext(t *testing.T) {
@@ -34,7 +36,11 @@ func TestListenerServesStatusAndStopsWithContext(t *testing.T) {
 		"/metrics": http.StatusOK,
 		"/version": http.StatusOK,
 	} {
-		response, requestErr := http.Get(baseURL + path)
+		request, requestErr := http.NewRequestWithContext(t.Context(), http.MethodGet, baseURL+path, nil)
+		if requestErr != nil {
+			t.Fatalf("create GET %s: %v", path, requestErr)
+		}
+		response, requestErr := http.DefaultClient.Do(request)
 		if requestErr != nil {
 			t.Fatalf("GET %s: %v", path, requestErr)
 		}
@@ -44,7 +50,11 @@ func TestListenerServesStatusAndStopsWithContext(t *testing.T) {
 		}
 	}
 
-	response, err := http.Get(baseURL + "/metrics")
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, baseURL+"/metrics", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +114,7 @@ func TestListenerBindsBeforeServe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = first.listener.Close() }()
+	defer func() { _ = first.Close() }()
 
 	if _, err := New("test").Listen(first.listener.Addr().String()); err == nil {
 		t.Fatal("Listen succeeded for an address that is in use")
@@ -116,7 +126,7 @@ func TestListenerReturnsUnexpectedServeError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := listener.listener.Close(); err != nil {
+	if err := listener.Close(); err != nil {
 		t.Fatal(err)
 	}
 	if err := listener.Serve(context.Background()); err == nil {
@@ -133,7 +143,11 @@ func TestReadyReportsUnavailable(t *testing.T) {
 	defer cancel()
 	go func() { _ = listener.Serve(ctx) }()
 
-	response, err := http.Get("http://" + listener.listener.Addr().String() + "/readyz")
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://"+listener.listener.Addr().String()+"/readyz", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +166,7 @@ func TestStatusRejectsUnsupportedMethods(t *testing.T) {
 	defer cancel()
 	go func() { _ = listener.Serve(ctx) }()
 
-	request, err := http.NewRequest(http.MethodPost, "http://"+listener.listener.Addr().String()+"/healthz", nil)
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://"+listener.listener.Addr().String()+"/healthz", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,4 +195,82 @@ func TestObserveQUICClearsMetricsAfterDisconnect(t *testing.T) {
 	if state.quicRTT.Load() != 0 || state.quicSent.Load() != 0 || state.quicReceived.Load() != 0 || state.quicLost.Load() != 0 {
 		t.Fatal("ObserveQUIC() kept metrics after the current connection closed")
 	}
+}
+
+func TestOlderQUICObserverDoesNotClearCurrentMetrics(t *testing.T) {
+	state := New("test")
+	olderDone := make(chan struct{})
+	olderStopped := make(chan struct{})
+	go func() {
+		state.ObserveQUIC(olderDone, nil)
+		close(olderStopped)
+	}()
+	waitForObserver(t, state, 1)
+
+	currentDone := make(chan struct{})
+	currentStopped := make(chan struct{})
+	go func() {
+		state.ObserveQUIC(currentDone, nil)
+		close(currentStopped)
+	}()
+	waitForObserver(t, state, 2)
+	state.quicRTT.Store(10)
+	state.quicSent.Store(20)
+	state.quicReceived.Store(30)
+	state.quicLost.Store(40)
+
+	close(olderDone)
+	select {
+	case <-olderStopped:
+	case <-time.After(time.Second):
+		t.Fatal("the older QUIC observer did not stop")
+	}
+	if state.quicRTT.Load() != 10 || state.quicSent.Load() != 20 || state.quicReceived.Load() != 30 || state.quicLost.Load() != 40 {
+		t.Fatal("the older QUIC observer cleared the current metrics")
+	}
+
+	close(currentDone)
+	select {
+	case <-currentStopped:
+	case <-time.After(time.Second):
+		t.Fatal("the current QUIC observer did not stop")
+	}
+	if state.quicRTT.Load() != 0 || state.quicSent.Load() != 0 || state.quicReceived.Load() != 0 || state.quicLost.Load() != 0 {
+		t.Fatal("the current QUIC observer kept metrics after it stopped")
+	}
+}
+
+func TestStoreQUICStatsRejectsASupersededObserver(t *testing.T) {
+	state := New("test")
+	state.quicObserver = 2
+	stats := quic.ConnectionStats{
+		SmoothedRTT:   10 * time.Millisecond,
+		BytesSent:     20,
+		BytesReceived: 30,
+		BytesLost:     40,
+	}
+	if state.storeQUICStats(1, stats) {
+		t.Fatal("storeQUICStats() accepted a superseded observer")
+	}
+	if !state.storeQUICStats(2, stats) {
+		t.Fatal("storeQUICStats() rejected the current observer")
+	}
+	if state.quicRTT.Load() != 10_000 || state.quicSent.Load() != 20 || state.quicReceived.Load() != 30 || state.quicLost.Load() != 40 {
+		t.Fatal("storeQUICStats() did not store the current connection statistics")
+	}
+}
+
+func waitForObserver(t *testing.T, state *Server, want uint64) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		state.quicMu.Lock()
+		got := state.quicObserver
+		state.quicMu.Unlock()
+		if got == want {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("QUIC observer generation did not reach %d", want)
 }

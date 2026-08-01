@@ -35,7 +35,7 @@ var (
 
 var namePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$`)
 
-var errCommandLine = errors.New("the command line is not valid")
+var errCommandLine = errors.New("The command line is not valid.")
 
 func main() {
 	os.Exit(run(os.Args))
@@ -59,6 +59,10 @@ func run(arguments []string) int {
 			return 1
 		}
 	case "version":
+		if len(arguments) != 2 {
+			usage()
+			return 2
+		}
 		fmt.Println(version)
 	default:
 		usage()
@@ -85,7 +89,7 @@ func initialize(arguments []string) error {
 		return errCommandLine
 	}
 	if flags.NArg() != 0 {
-		return fmt.Errorf("init does not accept argument %q", flags.Arg(0))
+		return errors.Join(errCommandLine, fmt.Errorf("The init command does not accept argument %q.", flags.Arg(0)))
 	}
 	if err := validateName("connector ID", *connectorID); err != nil {
 		return err
@@ -254,15 +258,13 @@ func writeSecretBundle(files []secretFile, force bool) error {
 	for index := range files {
 		temp, err := stageSecret(files[index].path, files[index].content)
 		if err != nil {
-			cleanupTemps(files)
-			return err
+			return errors.Join(err, cleanupTemps(files))
 		}
 		files[index].temp = temp
 	}
 	if force {
 		if err := preserveSecrets(files); err != nil {
-			cleanupTemps(files)
-			return err
+			return errors.Join(err, cleanupTemps(files))
 		}
 	}
 
@@ -302,17 +304,20 @@ func writeSecretBundle(files []secretFile, force bool) error {
 	return nil
 }
 
-func stageSecret(path, content string) (string, error) {
+func stageSecret(path, content string) (temp string, resultErr error) {
 	file, err := createTempFile(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
 	if err != nil {
 		return "", fmt.Errorf("create temporary file for %s: %w", path, err)
 	}
-	temp := file.Name()
-	ok := false
+	tempPath := file.Name()
+	temp = tempPath
+	closed := false
 	defer func() {
-		if !ok {
-			file.Close()
-			removeFile(temp)
+		if resultErr != nil {
+			if !closed {
+				resultErr = errors.Join(resultErr, closeWorkFile(file, path))
+			}
+			resultErr = errors.Join(resultErr, removeWorkFile(tempPath, path))
 		}
 	}()
 	if err := file.Chmod(0o600); err != nil {
@@ -327,8 +332,22 @@ func stageSecret(path, content string) (string, error) {
 	if err := file.Close(); err != nil {
 		return "", fmt.Errorf("close temporary file for %s: %w", path, err)
 	}
-	ok = true
+	closed = true
 	return temp, nil
+}
+
+func closeWorkFile(file *os.File, target string) error {
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close work file for %s: %w", target, err)
+	}
+	return nil
+}
+
+func removeWorkFile(path, target string) error {
+	if err := removeFile(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove work file for %s: %w", target, err)
+	}
+	return nil
 }
 
 func preserveSecrets(files []secretFile) error {
@@ -344,12 +363,10 @@ func preserveSecrets(files []secretFile) error {
 		}
 		backup := placeholder.Name()
 		if err := placeholder.Close(); err != nil {
-			removeFile(backup)
-			return errors.Join(fmt.Errorf("close backup for %s: %w", files[index].path, err), restoreBackups(files))
+			return errors.Join(fmt.Errorf("close backup for %s: %w", files[index].path, err), removeWorkFile(backup, files[index].path), restoreBackups(files))
 		}
 		if err := renameFile(files[index].path, backup); err != nil {
-			removeFile(backup)
-			return errors.Join(fmt.Errorf("preserve %s: %w", files[index].path, err), restoreBackups(files))
+			return errors.Join(fmt.Errorf("preserve %s: %w", files[index].path, err), removeWorkFile(backup, files[index].path), restoreBackups(files))
 		}
 		files[index].backup = backup
 	}
@@ -368,7 +385,7 @@ func rollbackSecrets(files []secretFile, force bool) error {
 	if force {
 		rollbackErr = errors.Join(rollbackErr, restoreBackups(files))
 	}
-	cleanupTemps(files)
+	rollbackErr = errors.Join(rollbackErr, cleanupTemps(files))
 	return rollbackErr
 }
 
@@ -387,10 +404,12 @@ func restoreBackups(files []secretFile) error {
 	return restoreErr
 }
 
-func cleanupTemps(files []secretFile) {
+func cleanupTemps(files []secretFile) error {
+	var cleanupErr error
 	for _, file := range files {
 		if file.temp != "" {
-			removeFile(file.temp)
+			cleanupErr = errors.Join(cleanupErr, removeWorkFile(file.temp, file.path))
 		}
 	}
+	return cleanupErr
 }
