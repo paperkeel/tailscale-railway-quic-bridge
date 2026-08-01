@@ -2,6 +2,14 @@
 
 This project uses Semantic Versioning.
 
+## 0.1.0-alpha.2 - 2026-08-01
+
+### Changed
+
+- Cross-compile multi-platform images on the native runner architecture.
+- Cache container layers between CI and release builds.
+- Use OCI provenance on private repositories and add GitHub attestations after publication.
+
 ## 0.1.0-alpha.1 - 2026-08-01
 
 ### Added
