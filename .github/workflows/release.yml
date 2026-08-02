@@ -2,7 +2,7 @@ name: Release images
 
 on:
   push:
-    tags: ["v*"]
+    tags: ["v*", "internal-testing"]
 
 permissions:
   contents: read
@@ -19,6 +19,8 @@ jobs:
         component: [edge, connector, cli]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
       - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
@@ -31,6 +33,7 @@ jobs:
         with:
           images: ghcr.io/bearfire-dev/tailscale-railway-quic-bridge-${{ matrix.component }}
           tags: |
+            type=raw,value=internal-testing,enable=${{ github.ref_name == 'internal-testing' }}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}

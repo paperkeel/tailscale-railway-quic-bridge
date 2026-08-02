@@ -1,6 +1,6 @@
 services:
   edge:
-    image: ghcr.io/bearfire-dev/tailscale-railway-quic-bridge-edge:0.1.0-alpha.2
+    image: ghcr.io/bearfire-dev/tailscale-railway-quic-bridge-edge:internal-testing
     env_file:
       - edge.env
     network_mode: host
