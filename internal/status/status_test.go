@@ -20,6 +20,8 @@ func TestListenerServesStatusAndStopsWithContext(t *testing.T) {
 	state.UDPFlowEnded()
 	state.DatagramDropped()
 	state.Denied()
+	state.quicSendRate.Store(123)
+	state.quicRecvRate.Store(456)
 
 	listener, err := state.Listen("127.0.0.1:0")
 	if err != nil {
@@ -72,6 +74,10 @@ func TestListenerServesStatusAndStopsWithContext(t *testing.T) {
 		"tailbridge_udp_flows_total 1",
 		"tailbridge_udp_datagrams_dropped_total 1",
 		"tailbridge_policy_denials_total 1",
+		"# TYPE tailbridge_quic_send_bits_per_second gauge",
+		"tailbridge_quic_send_bits_per_second 123",
+		"# TYPE tailbridge_quic_receive_bits_per_second gauge",
+		"tailbridge_quic_receive_bits_per_second 456",
 	} {
 		if !strings.Contains(metrics, want) {
 			t.Errorf("metrics do not contain %q\n%s", want, metrics)

@@ -63,7 +63,7 @@ QUIC observer. Use this alert for a sustained target violation:
 
 ```yaml
 - alert: TailbridgeConnectorRTTHigh
-  expr: tailbridge_ready == 1 and tailbridge_quic_smoothed_rtt_microseconds > 25000
+  expr: tailbridge_ready == 1 and tailbridge_quic_smoothed_rtt_microseconds >= 25000
   for: 1m
   labels:
     severity: warning
