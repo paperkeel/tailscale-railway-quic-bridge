@@ -16,6 +16,7 @@ import (
 	"math/big"
 	"net"
 	"net/netip"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -987,7 +988,7 @@ func testQUICPair(t *testing.T) (*quic.Conn, *quic.Conn, func()) {
 		}
 		accepted <- connection
 	}()
-	clientTLS := &tls.Config{InsecureSkipVerify: true, NextProtos: []string{protocol.ALPN}}
+	clientTLS := &tls.Config{Certificates: []tls.Certificate{testTLSCertificate(t)}, InsecureSkipVerify: true, NextProtos: []string{protocol.ALPN}}
 	client, err := quic.DialAddr(context.Background(), listener.Addr().String(), clientTLS, &quic.Config{EnableDatagrams: true})
 	if err != nil {
 		_ = listener.Close()
@@ -1012,7 +1013,7 @@ func testQUICPair(t *testing.T) (*quic.Conn, *quic.Conn, func()) {
 func testQUICListener(t *testing.T) *quic.Listener {
 	t.Helper()
 	certificate := testTLSCertificate(t)
-	serverTLS := &tls.Config{Certificates: []tls.Certificate{certificate}, NextProtos: []string{protocol.ALPN}}
+	serverTLS := &tls.Config{Certificates: []tls.Certificate{certificate}, ClientAuth: tls.RequestClientCert, NextProtos: []string{protocol.ALPN}}
 	listener, err := quic.ListenAddr("127.0.0.1:0", serverTLS, &quic.Config{EnableDatagrams: true})
 	if err != nil {
 		t.Fatal(err)
@@ -1032,7 +1033,8 @@ func testTLSCertificate(t *testing.T) tls.Certificate {
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().Add(time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+		URIs:         []*url.URL{{Scheme: "spiffe", Host: "tailbridge.local", Path: "/connector/railway-production"}},
 	}
 	der, err := x509.CreateCertificate(rand.Reader, template, template, public, private)
 	if err != nil {

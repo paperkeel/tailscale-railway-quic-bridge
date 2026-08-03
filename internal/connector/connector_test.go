@@ -60,6 +60,19 @@ func TestJitterStaysWithinBounds(t *testing.T) {
 	}
 }
 
+func TestRunRejectsInvalidDNSConfiguration(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	client := testClient(config.Connector{
+		RealPrefix:    netip.MustParsePrefix("10.0.0.0/8"),
+		VirtualPrefix: netip.MustParsePrefix("fd20::/16"),
+		DNSSuffix:     "test.railway.internal",
+	})
+	if err := client.Run(ctx); err == nil || !strings.Contains(err.Error(), "configure DNS proxy") {
+		t.Fatalf("Run() error = %v, want a DNS proxy configuration error", err)
+	}
+}
+
 func TestValidateAcceptedChecksConnectorAssignment(t *testing.T) {
 	cfg := config.Connector{
 		Common:        config.Common{ConnectorID: "production"},

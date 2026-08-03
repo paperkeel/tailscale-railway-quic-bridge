@@ -5,6 +5,7 @@ import {
 	createDigitalOceanEdge,
 	edgeFirewallRules,
 	edgeVolumeResourceOptions,
+	prepareScript,
 } from "./digitalocean";
 
 const resources: pulumi.runtime.MockResourceArgs[] = [];
@@ -131,6 +132,15 @@ describe("DigitalOcean edge structure", () => {
 		});
 		expect(attachment.inputs.volumeId).toBe("Tailbridge-edge-state-id");
 		expect(edgeVolumeResourceOptions).toEqual({ retainOnDelete: true });
+	});
+
+	it("preserves an existing secret environment until the atomic upload", () => {
+		expect(prepareScript("tailbridge-state")).toContain(
+			"chmod 0600 /opt/tailbridge/edge.env",
+		);
+		expect(prepareScript("tailbridge-state")).not.toContain(
+			"/dev/null /opt/tailbridge/edge.env",
+		);
 	});
 
 	it("returns workstation SSH commands without secret taint", () => {

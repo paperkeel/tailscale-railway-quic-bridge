@@ -30,6 +30,7 @@ type Client struct {
 	version string
 	started int64
 	dns     *dnsproxy.Rewriter
+	dnsErr  error
 	dnsAddr netip.AddrPort
 }
 
@@ -52,8 +53,8 @@ type udpSession struct {
 const maxUDPPayload = 8 * 1024
 
 func New(cfg config.Connector, logger *slog.Logger, state *status.Server, version string) *Client {
-	dns, _ := dnsproxy.New(cfg.RealPrefix, cfg.VirtualPrefix, cfg.DNSSuffix)
-	return &Client{config: cfg, logger: logger, status: state, version: version, started: time.Now().UnixNano(), dns: dns, dnsAddr: dnsAddress(cfg.RealPrefix)}
+	dns, dnsErr := dnsproxy.New(cfg.RealPrefix, cfg.VirtualPrefix, cfg.DNSSuffix)
+	return &Client{config: cfg, logger: logger, status: state, version: version, started: time.Now().UnixNano(), dns: dns, dnsErr: dnsErr, dnsAddr: dnsAddress(cfg.RealPrefix)}
 }
 
 func dnsAddress(prefix netip.Prefix) netip.AddrPort {
@@ -66,6 +67,9 @@ func dnsAddress(prefix netip.Prefix) netip.AddrPort {
 }
 
 func (c *Client) Run(ctx context.Context) error {
+	if c.dnsErr != nil {
+		return fmt.Errorf("configure DNS proxy: %w", c.dnsErr)
+	}
 	tlsConfig, err := transport.ClientTLS(c.config.Common)
 	if err != nil {
 		return fmt.Errorf("configure TLS: %w", err)

@@ -48,6 +48,65 @@ beforeAll(() => {
 });
 
 describe("Tailbridge", () => {
+	it("rejects a virtual network that the data plane does not support", () => {
+		expect(
+			() =>
+				new Tailbridge("UnsupportedNetwork", {
+					stage: "test",
+					edgeId: "shared-edge",
+					virtualNetwork: "fd40::/11",
+					edge: {
+						provider: "digitalocean",
+						region: "nyc3",
+						size: "s-1vcpu-1gb",
+						sshSourceCidrs: ["192.0.2.0/24"],
+					},
+					connectors: [
+						{
+							name: "api",
+							slot: 0,
+							projectId: "api-project",
+							environmentId: "api-environment",
+						},
+					],
+					tailscaleAuthKey: pulumi.secret("secret-auth-key"),
+				}),
+		).toThrow(
+			"virtualNetwork must be fd20::/11 until the data plane supports other networks.",
+		);
+	});
+
+	it("rejects a development package in a production stage", () => {
+		expect(
+			() =>
+				new Tailbridge("Production", {
+					stage: "production",
+					edgeId: "shared-edge",
+					edge: {
+						provider: "digitalocean",
+						region: "nyc3",
+						size: "s-1vcpu-1gb",
+						sshSourceCidrs: ["192.0.2.0/24"],
+					},
+					connectors: [
+						{
+							name: "api",
+							slot: 0,
+							projectId: "api-project",
+							environmentId: "api-environment",
+						},
+					],
+					tailscaleAuthKey: pulumi.secret("secret-auth-key"),
+					images: {
+						edge: `example.com/edge@sha256:${"a".repeat(64)}`,
+						connector: `example.com/connector@sha256:${"b".repeat(64)}`,
+					},
+				}),
+		).toThrow(
+			"A development package cannot deploy outside a development or test stage.",
+		);
+	});
+
 	it("creates one edge and exposes safe outputs for multiple targets", async () => {
 		const outputs = await pulumi.runtime.runInPulumiStack(async () => {
 			const tailbridge = new Tailbridge("Tailbridge", {

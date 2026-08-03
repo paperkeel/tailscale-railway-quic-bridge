@@ -280,10 +280,6 @@ func (s *Server) authenticate(ctx context.Context, conn *quic.Conn) {
 		entry = &connectorEntry{target: config.ConnectorTarget{ConnectorID: s.config.ConnectorID, Environment: s.config.Environment, VirtualPrefix: realPrefix, RealPrefix: realPrefix}}
 	}
 	certificateID, identityErr := connectorIdentity(conn)
-	if identityErr != nil && len(s.config.CABundle) == 0 {
-		certificateID = hello.ConnectorID
-		identityErr = nil
-	}
 	if hello.ProtocolVersion != protocol.ProtocolVersion || entry == nil || identityErr != nil || hello.ConnectorID != certificateID || hello.Environment != entry.target.Environment {
 		s.status.Denied()
 		_ = conn.CloseWithError(3, "The edge rejected the connector identity.")
@@ -358,7 +354,7 @@ func (s *Server) authenticate(ctx context.Context, conn *quic.Conn) {
 	if len(s.registry) == 0 {
 		s.status.SetReady(true)
 	}
-	go s.status.ObserveQUIC(conn.Context().Done(), conn)
+	go s.status.ObserveConnectorQUIC(hello.ConnectorID, conn.Context().Done(), conn)
 	s.logger.Info("connector session ready", "event.name", "connector.session", "session_id", id, "connector_id", hello.ConnectorID, "slot", entry.target.Slot, "version", hello.SoftwareVersion)
 	go s.receiveUDP(next)
 	if previous != nil {
@@ -555,6 +551,9 @@ func (s *Server) route(destination netip.AddrPort) (*session, netip.AddrPort, bo
 		}
 		return active, translated, true
 	}
+	if len(s.routes) != 0 {
+		return nil, netip.AddrPort{}, false
+	}
 	active := s.session.Load()
 	if active == nil || active.draining.Load() || !config.Allowed(active.routes, destination.Addr().Unmap()) {
 		return nil, netip.AddrPort{}, false
@@ -611,6 +610,7 @@ func (s *Server) handleTCP(ctx context.Context, client net.Conn) {
 	active, translated, ok := s.route(addressPort)
 	if !ok {
 		errorCode = "SESSION_UNAVAILABLE"
+		s.status.Denied()
 		_ = client.Close()
 		return
 	}

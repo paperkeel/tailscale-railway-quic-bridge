@@ -6,6 +6,7 @@ import {
 	renderCloudInit,
 	renderCompose,
 	renderEdgeEnvironment,
+	edgeImageReference,
 } from "./runtime";
 
 describe("edge runtime rendering", () => {
@@ -61,10 +62,28 @@ describe("edge runtime rendering", () => {
 		expect(renderCompose("internal-testing", template)).toBe(
 			"image: ghcr.io/bearfire-dev/tailscale-railway-quic-bridge-edge:internal-testing\n",
 		);
-		expect(renderCompose("sha256:abc", template)).toContain("@sha256:abc");
+		const digest = `sha256:${"a".repeat(64)}`;
+		expect(renderCompose(digest, template)).toContain(`@${digest}`);
 		expect(renderCompose("registry.example/edge:v1", template)).toBe(
 			"image: registry.example/edge:v1\n",
 		);
+		expect(renderCompose("tailbridge-edge:test", template)).toBe(
+			"image: tailbridge-edge:test\n",
+		);
+	});
+
+	it("rejects mutable and malformed edge image references", () => {
+		expect(() => edgeImageReference("latest")).toThrow("latest tag");
+		expect(() => edgeImageReference("registry.example/edge:latest")).toThrow(
+			"latest tag",
+		);
+		expect(() => edgeImageReference("registry.example/edge")).toThrow(
+			"tag or digest",
+		);
+		expect(() => edgeImageReference("sha256:abc")).toThrow(
+			"complete SHA-256 digest",
+		);
+		expect(() => edgeImageReference("edge tag")).toThrow("whitespace");
 	});
 
 	it("binds the persistent Tailscale state into the edge container", () => {

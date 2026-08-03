@@ -29,14 +29,14 @@ export function createCertificates(
 		isCaCertificate: true,
 		validityPeriodHours: 24 * 365 * 10,
 		earlyRenewalHours: 24 * 30,
-		allowedUses: ["certSigning", "digitalSignature"],
+		allowedUses: ["cert_signing", "digital_signature"],
 		subject: { commonName: `Tailbridge ${edgeId} CA` },
 	}, opts);
 
 	const edge = createLeaf(
 		`${name}-edge`,
 		"edge",
-		"serverAuth",
+		"server_auth",
 		edgeId,
 		ca,
 		caKey,
@@ -47,7 +47,7 @@ export function createCertificates(
 		const leaf = createLeaf(
 			`${name}-connector-${connectorId}`,
 			"connector",
-			"clientAuth",
+			"client_auth",
 			connectorId,
 			ca,
 			caKey,
@@ -75,7 +75,7 @@ export function createCertificates(
 function createLeaf(
 	name: string,
 	role: "edge" | "connector",
-	usage: "serverAuth" | "clientAuth",
+	usage: "server_auth" | "client_auth",
 	identity: string,
 	ca: tls.SelfSignedCert,
 	caKey: tls.PrivateKey,
@@ -93,7 +93,7 @@ function createLeaf(
 		caCertPem: ca.certPem,
 		validityPeriodHours: 24 * 90,
 		earlyRenewalHours: 24 * 30,
-		allowedUses: ["digitalSignature", usage],
+		allowedUses: ["digital_signature", usage],
 	}, opts);
 	return { key, certificate };
 }

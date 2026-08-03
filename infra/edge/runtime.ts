@@ -84,7 +84,7 @@ export function renderCompose(
 	image: string,
 	template = loadComposeTemplate(),
 ): string {
-	const reference = imageReference(image);
+	const reference = edgeImageReference(image);
 	if (!template.includes("{{EDGE_IMAGE}}")) {
 		throw new Error("The edge Compose template must contain {{EDGE_IMAGE}}.");
 	}
@@ -101,14 +101,63 @@ export function deploymentHash(...contents: string[]): string {
 	return hash.digest("hex");
 }
 
-function imageReference(image: string): string {
-	if (image.includes("/")) {
-		return image;
+export function edgeImageReference(image: string): string {
+	if (image !== image.trim() || !image || /\s/.test(image)) {
+		throw new Error("The edge image reference must not contain whitespace.");
+	}
+	if (image === "latest" || image.endsWith(":latest")) {
+		throw new Error("The edge image reference must not use the latest tag.");
 	}
 	if (image.startsWith("sha256:")) {
+		validateDigest(image);
 		return `${edgeImageRepository}@${image}`;
 	}
+	if (image.includes("@")) {
+		const [repository, digest, extra] = image.split("@");
+		if (extra !== undefined || !isRepository(repository)) {
+			throw new Error("The edge image reference is invalid.");
+		}
+		validateDigest(digest);
+		return image;
+	}
+	if (image.includes("/")) {
+		if (!isTaggedRepository(image)) {
+			throw new Error("The edge image reference must include a tag or digest.");
+		}
+		return image;
+	}
+	if (image.includes(":")) {
+		if (!isTaggedRepository(image)) {
+			throw new Error("The edge image reference is invalid.");
+		}
+		return image;
+	}
+	if (!/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/.test(image)) {
+		throw new Error("The edge image tag is invalid.");
+	}
 	return `${edgeImageRepository}:${image}`;
+}
+
+function validateDigest(digest: string): void {
+	if (!/^sha256:[a-f0-9]{64}$/.test(digest)) {
+		throw new Error("The edge image digest must be a complete SHA-256 digest.");
+	}
+}
+
+function isRepository(repository: string): boolean {
+	return /^(?:[a-zA-Z0-9.-]+(?::[0-9]+)?\/)?[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$/.test(
+		repository,
+	);
+}
+
+function isTaggedRepository(reference: string): boolean {
+	const separator = reference.lastIndexOf(":");
+	const slash = reference.lastIndexOf("/");
+	if (separator <= slash) return false;
+	return (
+		isRepository(reference.slice(0, separator)) &&
+		/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/.test(reference.slice(separator + 1))
+	);
 }
 
 function environmentValue(value: string): string {

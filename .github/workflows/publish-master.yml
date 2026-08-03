@@ -15,7 +15,10 @@ concurrency:
 
 jobs:
   images:
-    if: github.event.workflow_run.conclusion == 'success'
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
     permissions:
       contents: read
       packages: write
@@ -26,10 +29,12 @@ jobs:
       fail-fast: false
       matrix:
         component: [edge, connector]
+    env:
+      SOURCE_COMMIT: ${{ github.event.workflow_run.head_sha }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
+          ref: ${{ env.SOURCE_COMMIT }}
           persist-credentials: false
       - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
@@ -45,12 +50,20 @@ jobs:
           file: Dockerfile.${{ matrix.component }}
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ghcr.io/bearfire-dev/tailscale-railway-quic-bridge-${{ matrix.component }}:sha-${{ github.event.workflow_run.head_sha }}
-          build-args: VERSION=sha-${{ github.event.workflow_run.head_sha }}
+          tags: ghcr.io/bearfire-dev/tailscale-railway-quic-bridge-${{ matrix.component }}:sha-${{ env.SOURCE_COMMIT }}
+          build-args: VERSION=sha-${{ env.SOURCE_COMMIT }}
           provenance: mode=max
           sbom: true
           cache-from: type=gha,scope=master-${{ matrix.component }}
           cache-to: type=gha,mode=max,scope=master-${{ matrix.component }}
+      - name: Make the deployment image public
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PACKAGE_NAME: tailscale-railway-quic-bridge-${{ matrix.component }}
+        run: >-
+          gh api --method PATCH
+          "/orgs/${{ github.repository_owner }}/packages/container/$PACKAGE_NAME"
+          --field visibility=public
       - name: Capture the image digest
         env:
           COMPONENT: ${{ matrix.component }}
@@ -70,6 +83,9 @@ jobs:
           push-to-registry: true
 
   package:
+    if: >-
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
     needs: images
     permissions:
       contents: read
@@ -77,10 +93,11 @@ jobs:
     runs-on: ubuntu-latest
     env:
       NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      SOURCE_COMMIT: ${{ github.event.workflow_run.head_sha }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
+          ref: ${{ env.SOURCE_COMMIT }}
           persist-credentials: false
       - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -96,8 +113,6 @@ jobs:
           merge-multiple: true
       - run: pnpm install --frozen-lockfile
       - name: Build the immutable package
-        env:
-          SOURCE_COMMIT: ${{ github.event.workflow_run.head_sha }}
         run: |
           version="0.0.0-sha.$SOURCE_COMMIT"
           edge_digest="$(cat "$RUNNER_TEMP/digests/edge-digest.txt")"
@@ -112,7 +127,7 @@ jobs:
           pnpm pack --pack-destination "$RUNNER_TEMP"
       - name: Test the packed package
         env:
-          VERSION: 0.0.0-sha.${{ github.event.workflow_run.head_sha }}
+          VERSION: 0.0.0-sha.${{ env.SOURCE_COMMIT }}
         run: |
           package="$RUNNER_TEMP/bearfire-dev-tailscale-railway-quic-bridge-$VERSION.tgz"
           test -f "$package"
@@ -125,8 +140,8 @@ jobs:
             "const module = await import('@bearfire-dev/tailscale-railway-quic-bridge'); if (typeof module.Tailbridge !== 'function') process.exit(1)"
       - name: Publish the package
         env:
-          VERSION: 0.0.0-sha.${{ github.event.workflow_run.head_sha }}
+          VERSION: 0.0.0-sha.${{ env.SOURCE_COMMIT }}
         run: |
           package="$RUNNER_TEMP/bearfire-dev-tailscale-railway-quic-bridge-$VERSION.tgz"
-          pnpm publish "$package" --access public --no-git-checks --tag "sha-${{ github.event.workflow_run.head_sha }}"
+          pnpm publish "$package" --access public --no-git-checks --tag "sha-$SOURCE_COMMIT"
           pnpm dist-tag add "@bearfire-dev/tailscale-railway-quic-bridge@$VERSION" master

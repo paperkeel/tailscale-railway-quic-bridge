@@ -135,6 +135,121 @@ func TestResponseRestoresNamesTranslatesAAAAAndFiltersA(t *testing.T) {
 	}
 }
 
+func TestResponseRewritesServiceBindingAddressHints(t *testing.T) {
+	rewriter := testRewriter(t)
+	message := new(dns.Msg)
+	message.SetQuestion("api.railway.internal.", dns.TypeHTTPS)
+	message.Answer = []dns.RR{&dns.HTTPS{SVCB: dns.SVCB{
+		Hdr:      dns.RR_Header{Name: "api.railway.internal.", Rrtype: dns.TypeHTTPS, Class: dns.ClassINET},
+		Priority: 1,
+		Target:   "target.railway.internal.",
+		Value: []dns.SVCBKeyValue{
+			&dns.SVCBIPv4Hint{Hint: []net.IP{net.ParseIP("192.0.2.1")}},
+			&dns.SVCBIPv6Hint{Hint: []net.IP{net.ParseIP("fd12:3456::42"), net.ParseIP("2001:db8::1")}},
+		},
+	}}}
+	payload, err := message.Pack()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rewritten, err := rewriter.Response(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	https := unpack(t, rewritten).Answer[0].(*dns.HTTPS)
+	if https.Target != "target.project.railway.internal." {
+		t.Fatalf("target = %q", https.Target)
+	}
+	if len(https.Value) != 1 {
+		t.Fatalf("service binding values = %v, want only IPv6 hints", https.Value)
+	}
+	hints := https.Value[0].(*dns.SVCBIPv6Hint).Hint
+	if hints[0].String() != "fd20:3456::42" || hints[1].String() != "2001:db8::1" {
+		t.Fatalf("IPv6 hints = %v", hints)
+	}
+}
+
+func TestForwardTCPPreservesResponseAfterClientHalfClose(t *testing.T) {
+	rewriter := testRewriter(t)
+	clientListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clientListener.Close()
+	upstreamListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer upstreamListener.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		proxyClient, acceptErr := clientListener.Accept()
+		if acceptErr != nil {
+			done <- acceptErr
+			return
+		}
+		proxyUpstream, dialErr := net.Dial("tcp", upstreamListener.Addr().String())
+		if dialErr != nil {
+			done <- dialErr
+			return
+		}
+		_, _, forwardErr := rewriter.ForwardTCP(proxyClient, proxyUpstream)
+		done <- forwardErr
+	}()
+	go func() {
+		upstream, acceptErr := upstreamListener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer upstream.Close()
+		request, readErr := readTCPMessage(upstream)
+		if readErr != nil {
+			return
+		}
+		response := new(dns.Msg)
+		response.SetReply(request)
+		response.Answer = []dns.RR{&dns.AAAA{Hdr: dns.RR_Header{Name: request.Question[0].Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET}, AAAA: net.ParseIP("fd12::55")}}
+		payload, packErr := response.Pack()
+		if packErr == nil {
+			_ = writeTCPMessage(upstream, payload)
+		}
+	}()
+
+	connection, err := net.DialTCP("tcp", nil, clientListener.Addr().(*net.TCPAddr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := new(dns.Msg)
+	query.SetQuestion("api.project.railway.internal.", dns.TypeAAAA)
+	payload, err := query.Pack()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeTCPMessage(connection, payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := connection.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	response, err := readTCPMessage(connection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := response.Answer[0].(*dns.AAAA).AAAA.String(); got != "fd20::55" {
+		t.Fatalf("AAAA = %s, want fd20::55", got)
+	}
+	_ = connection.Close()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ForwardTCP() did not stop")
+	}
+}
+
 func TestNewRejectsInvalidConfiguration(t *testing.T) {
 	real := netip.MustParsePrefix("fd12::/16")
 	virtual := netip.MustParsePrefix("fd20::/16")

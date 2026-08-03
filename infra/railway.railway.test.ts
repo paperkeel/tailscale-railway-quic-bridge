@@ -67,6 +67,8 @@ describe("createRailwayConnector", () => {
 		const serialized = JSON.stringify(variables.inputs.variables);
 		for (const value of [
 			"TB_EDGE_ID",
+			"TB_ENVIRONMENT",
+			"environment-existing",
 			"TB_VIRTUAL_PREFIX",
 			"fd20::/16",
 			"TB_REAL_PREFIX",
@@ -115,6 +117,31 @@ describe("requestRailwayGraphql", () => {
 			),
 		).rejects.toThrow(
 			"Railway GraphQL request failed (200): Environment not found",
+		);
+	});
+
+	it("rejects a non-JSON response and sets a request timeout", async () => {
+		const request = vi.fn<typeof fetch>().mockResolvedValue(
+			new Response("upstream unavailable", { status: 502 }),
+		);
+		await expect(
+			requestRailwayGraphql("query TailbridgeTest { me { id } }", {}, "token", request),
+		).rejects.toThrow(
+			"Railway GraphQL request failed (502): The response was not valid JSON.",
+		);
+		expect(request.mock.calls[0]?.[1]?.signal).toBeInstanceOf(AbortSignal);
+	});
+
+	it("rejects a mutation result that returns false", async () => {
+		const request = vi.fn<typeof fetch>().mockResolvedValue(
+			new Response(JSON.stringify({ data: { serviceInstanceUpdate: false } }), {
+				status: 200,
+			}),
+		);
+		await expect(
+			requestRailwayGraphql("mutation TailbridgeTest { test }", {}, "token", request),
+		).rejects.toThrow(
+			"Railway GraphQL request failed (200): The mutation returned false.",
 		);
 	});
 });

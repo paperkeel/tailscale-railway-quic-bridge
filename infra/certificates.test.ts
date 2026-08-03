@@ -75,7 +75,7 @@ describe("createCertificates", () => {
 			isCaCertificate: true,
 			validityPeriodHours: 87_600,
 			earlyRenewalHours: 720,
-			allowedUses: ["certSigning", "digitalSignature"],
+			allowedUses: ["cert_signing", "digital_signature"],
 		});
 
 		const edgeRequest = resource("Tailbridge-edge-request");
@@ -94,11 +94,11 @@ describe("createCertificates", () => {
 		expect(edgeCertificate.inputs).toMatchObject({
 			validityPeriodHours: 2_160,
 			earlyRenewalHours: 720,
-			allowedUses: ["digitalSignature", "serverAuth"],
+			allowedUses: ["digital_signature", "server_auth"],
 		});
 		const connectorCertificate = resource("Tailbridge-connector-api-certificate");
 		expect(connectorCertificate.inputs).toMatchObject({
-			allowedUses: ["digitalSignature", "clientAuth"],
+			allowedUses: ["digital_signature", "client_auth"],
 		});
 	});
 });

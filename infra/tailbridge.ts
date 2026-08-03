@@ -68,6 +68,11 @@ export class Tailbridge extends pulumi.ComponentResource {
 	) {
 		super("tailbridge:index:Tailbridge", name, {}, opts);
 		const normalized = normalizeTailbridgeArgs(args);
+		if (normalized.virtualNetwork !== "fd20::/11") {
+			throw new Error(
+				"virtualNetwork must be fd20::/11 until the data plane supports other networks.",
+			);
+		}
 		const images = resolveImages(normalized.stage, normalized.images);
 		const certificates = createCertificates(
 			name,
@@ -83,7 +88,7 @@ export class Tailbridge extends pulumi.ComponentResource {
 			edge: normalized.edge,
 			connectors: normalized.connectors.map((target) => ({
 				connectorId: target.name,
-				environment: normalized.stage,
+				environment: target.environmentId,
 				slot: target.slot,
 				virtualPrefix: target.virtualPrefix,
 				realPrefix: target.realPrefix,
@@ -176,20 +181,30 @@ function resolveImages(
 	stage: string,
 	overrides: TailbridgeArgs["images"],
 ): { edge: string; connector: string } {
-	if (
-		tailbridgeBuild.sourceCommit === "development" &&
-		!overrides?.edge &&
-		!overrides?.connector &&
-		!isDevelopmentStage(stage)
-	) {
-		throw new Error(
-			"The development build metadata requires image overrides outside a development or test stage.",
-		);
-	}
-	return {
+	const images = {
 		edge: overrides?.edge ?? tailbridgeBuild.edgeImage,
 		connector: overrides?.connector ?? tailbridgeBuild.connectorImage,
 	};
+	if (tailbridgeBuild.sourceCommit === "development" && !isDevelopmentStage(stage)) {
+		throw new Error(
+			"A development package cannot deploy outside a development or test stage.",
+		);
+	}
+	if (!isDevelopmentStage(stage)) {
+		validateImmutableImage("edge", images.edge);
+		validateImmutableImage("connector", images.connector);
+	}
+	return images;
+}
+
+function validateImmutableImage(component: string, image: string): void {
+	const digest = /@sha256:[a-f0-9]{64}$/i;
+	const commitTag = /:sha-[a-f0-9]{40}$/i;
+	if (!digest.test(image) && !commitTag.test(image)) {
+		throw new Error(
+			`${component} image must use a SHA-256 digest or a full commit SHA tag.`,
+		);
+	}
 }
 
 function isDevelopmentStage(stage: string): boolean {

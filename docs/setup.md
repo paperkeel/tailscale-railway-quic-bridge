@@ -51,7 +51,11 @@ The template installs `@bearfire-dev/tailscale-railway-quic-bridge` from `https:
 
 2. Grant the token access to the `bearfire-dev` package when GitHub requests package authorization.
 
-3. Add the token to the deployment repository as the `GH_PACKAGES_TOKEN` Actions secret.
+3. Open the deployment repository settings.
+
+4. Open **Environments**, and then open the `production` environment.
+
+5. Add the token as the `GH_PACKAGES_TOKEN` environment secret.
 
 Do not commit this token to `.npmrc`, `package.json`, or another repository file.
 
@@ -191,7 +195,11 @@ The installed package metadata pins the matching edge and connector image digest
 
 3. Add narrow grants for the required users, virtual destinations, and ports.
 
-4. Approve `TAILBRIDGE_VIRTUAL_NETWORK` when the policy does not approve the route automatically.
+4. Approve each assigned virtual `/16` when the policy does not approve routes automatically.
+
+   For example, approve `fd20::/16` for slot `0` and `fd21::/16` for slot `1`.
+
+   Do not approve the complete `fd20::/11` range.
 
 5. Configure one split DNS entry for each connector.
 
@@ -382,13 +390,15 @@ Do not let SST create replacements for a working edge or persistent volume.
 
 4. Assign the existing Railway environment a stable connector slot.
 
-5. Add explicit SST or Pulumi import options for every existing resource.
+5. Add an `import` option to each existing provider resource in a custom component copy.
 
-6. Import each resource into the component resource name and `production` stage.
-
-   ```bash
-   pnpm sst import COMPONENT_RESOURCE_URN PROVIDER_RESOURCE_ID --stage production
+   ```typescript
+   new digitalocean.Droplet('Edge', args, {
+     import: 'existing-droplet-id',
+   });
    ```
+
+6. Add the correct provider ID to each resource `import` option.
 
 7. Run the SST diff.
 
@@ -404,7 +414,11 @@ Do not let SST create replacements for a working edge or persistent volume.
 
 13. Remove the old direct Railway route after clients use the virtual route.
 
-Resource names and provider import IDs depend on the source deployment. Replace both placeholders with the reviewed values.
+Resource types and provider import IDs depend on the source deployment.
+
+The published component does not expose resource import options. Use a custom component copy for this migration.
+
+Remove each `import` option after SST records the resource in the `production` stage.
 
 Do not import a resource that another deployment system still manages.
 

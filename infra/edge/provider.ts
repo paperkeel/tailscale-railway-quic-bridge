@@ -10,7 +10,7 @@ export interface EdgeCertificates {
 
 export interface EdgeConnectorConfig {
 	connectorId: string;
-	environment: string;
+	environment: pulumi.Input<string>;
 	slot: number;
 	virtualPrefix: string;
 	realPrefix: string;

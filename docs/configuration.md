@@ -22,6 +22,7 @@ Use the Tailbridge CLI to generate mutual TLS values. Never commit generated env
 | Variable | Required | Default | Description |
 |---|---:|---|---|
 | `TB_CONNECTORS_B64` | Yes | None | Base64 JSON connector registry. SST sets this value. |
+| `TB_ALLOWED_ROUTES` | Yes | None | Comma-separated virtual destination CIDRs. SST sets the assigned connector `/16` routes. |
 | `TB_QUIC_LISTEN_ADDR` | No | `:4433` | QUIC listen address for Tailbridge connector sessions. |
 | `TB_TCP_LISTEN_ADDR` | No | `[::]:15001` | Transparent TCP listen address. |
 | `TB_UDP_LISTEN_ADDR` | No | `[::]:15002` | Transparent UDP listen address. |

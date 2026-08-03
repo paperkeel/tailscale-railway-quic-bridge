@@ -8,11 +8,15 @@ import (
 	"net"
 	"net/netip"
 	"strings"
+	"time"
 
 	"github.com/miekg/dns"
 )
 
-const railwaySuffix = "railway.internal."
+const (
+	railwaySuffix   = "railway.internal."
+	tcpDrainTimeout = 250 * time.Millisecond
+)
 
 type Rewriter struct {
 	realPrefix    netip.Prefix
@@ -127,9 +131,34 @@ func (r *Rewriter) rewriteRecord(record dns.RR) {
 		value.Replacement = r.responseName(value.Replacement)
 	case *dns.SVCB:
 		value.Target = r.responseName(value.Target)
+		value.Value = r.rewriteSVCBValues(value.Value)
 	case *dns.HTTPS:
 		value.Target = r.responseName(value.Target)
+		value.Value = r.rewriteSVCBValues(value.Value)
 	}
+}
+
+func (r *Rewriter) rewriteSVCBValues(values []dns.SVCBKeyValue) []dns.SVCBKeyValue {
+	result := values[:0]
+	for _, value := range values {
+		switch hint := value.(type) {
+		case *dns.SVCBIPv4Hint:
+			continue
+		case *dns.SVCBIPv6Hint:
+			for index, address := range hint.Hint {
+				parsed, ok := netip.AddrFromSlice(address)
+				if !ok || !r.realPrefix.Contains(parsed) {
+					continue
+				}
+				bytes := parsed.As16()
+				virtual := r.virtualPrefix.Addr().As16()
+				bytes[0], bytes[1] = virtual[0], virtual[1]
+				hint.Hint[index] = net.IP(bytes[:])
+			}
+		}
+		result = append(result, value)
+	}
+	return result
 }
 
 func (r *Rewriter) responseName(name string) string {
@@ -164,16 +193,24 @@ func (r *Rewriter) ForwardTCP(client io.ReadWriteCloser, upstream net.Conn) (int
 	results := make(chan result, 2)
 	go func() {
 		count, err := r.forwardQueries(client, upstream)
+		closeWrite(upstream)
 		results <- result{query: true, bytes: count, err: err}
 	}()
 	go func() {
 		count, err := r.forwardResponses(upstream, client)
+		closeWrite(client)
 		results <- result{bytes: count, err: err}
 	}()
 	first := <-results
+	if transferError(first.err) != nil || !first.query {
+		_ = upstream.Close()
+		_ = client.Close()
+	} else {
+		_ = upstream.SetReadDeadline(time.Now().Add(tcpDrainTimeout))
+	}
+	second := <-results
 	_ = upstream.Close()
 	_ = client.Close()
-	second := <-results
 	var sent, received int64
 	if first.query {
 		sent, received = first.bytes, second.bytes
@@ -183,8 +220,18 @@ func (r *Rewriter) ForwardTCP(client io.ReadWriteCloser, upstream net.Conn) (int
 	return sent, received, errors.Join(transferError(first.err), transferError(second.err))
 }
 
+func closeWrite(connection any) {
+	if writer, ok := connection.(interface{ CloseWrite() error }); ok {
+		_ = writer.CloseWrite()
+	}
+}
+
 func transferError(err error) error {
 	if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+		return nil
+	}
+	var networkError net.Error
+	if errors.As(err, &networkError) && networkError.Timeout() {
 		return nil
 	}
 	return err

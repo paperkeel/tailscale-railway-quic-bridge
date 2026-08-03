@@ -16,34 +16,51 @@ import (
 )
 
 type Server struct {
-	healthy      atomic.Bool
-	ready        atomic.Bool
-	connectorsMu sync.RWMutex
-	connectors   map[string]Connector
-	active       atomic.Int64
-	flows        atomic.Uint64
-	udpActive    atomic.Int64
-	udpFlows     atomic.Uint64
-	udpDropped   atomic.Uint64
-	denied       atomic.Uint64
-	quicRTT      atomic.Int64
-	quicSent     atomic.Uint64
-	quicReceived atomic.Uint64
-	quicLost     atomic.Uint64
-	quicSendRate atomic.Uint64
-	quicRecvRate atomic.Uint64
-	quicMu       sync.Mutex
-	quicObserver uint64
-	version      string
+	healthy       atomic.Bool
+	ready         atomic.Bool
+	connectorsMu  sync.RWMutex
+	connectors    map[string]Connector
+	active        atomic.Int64
+	flows         atomic.Uint64
+	udpActive     atomic.Int64
+	udpFlows      atomic.Uint64
+	udpDropped    atomic.Uint64
+	denied        atomic.Uint64
+	quicRTT       atomic.Int64
+	quicSent      atomic.Uint64
+	quicReceived  atomic.Uint64
+	quicLost      atomic.Uint64
+	quicSendRate  atomic.Uint64
+	quicRecvRate  atomic.Uint64
+	quicMu        sync.Mutex
+	quicObserver  uint64
+	connectorQUIC map[string]*quicMetrics
+	version       string
+}
+
+type quicMetrics struct {
+	observer    uint64
+	rtt         int64
+	sent        uint64
+	received    uint64
+	lost        uint64
+	sendRate    uint64
+	receiveRate uint64
 }
 
 type Connector struct {
-	ConnectorID   string `json:"connector_id"`
-	Slot          int    `json:"slot"`
-	VirtualPrefix string `json:"virtual_prefix"`
-	RealPrefix    string `json:"real_prefix"`
-	Ready         bool   `json:"ready"`
-	SessionID     string `json:"session_id,omitempty"`
+	ConnectorID                 string `json:"connector_id"`
+	Slot                        int    `json:"slot"`
+	VirtualPrefix               string `json:"virtual_prefix"`
+	RealPrefix                  string `json:"real_prefix"`
+	Ready                       bool   `json:"ready"`
+	SessionID                   string `json:"session_id,omitempty"`
+	SessionAgeSeconds           int64  `json:"session_age_seconds,omitempty"`
+	QUICSmoothedRTTMicroseconds int64  `json:"quic_smoothed_rtt_microseconds,omitempty"`
+	QUICBytesSent               uint64 `json:"quic_bytes_sent,omitempty"`
+	QUICBytesReceived           uint64 `json:"quic_bytes_received,omitempty"`
+	QUICBytesLost               uint64 `json:"quic_bytes_lost,omitempty"`
+	sessionStartedAt            time.Time
 }
 
 type Snapshot struct {
@@ -56,7 +73,7 @@ type Snapshot struct {
 }
 
 func New(version string) *Server {
-	server := &Server{version: version, connectors: make(map[string]Connector)}
+	server := &Server{version: version, connectors: make(map[string]Connector), connectorQUIC: make(map[string]*quicMetrics)}
 	server.healthy.Store(true)
 	return server
 }
@@ -75,10 +92,17 @@ func (s *Server) ConfigureConnectors(connectors []Connector) {
 	for _, connector := range connectors {
 		connector.Ready = false
 		connector.SessionID = ""
+		connector.sessionStartedAt = time.Time{}
 		s.connectors[connector.ConnectorID] = connector
 	}
+	s.setConnectorReadinessLocked()
 	s.connectorsMu.Unlock()
-	s.updateReady()
+	s.quicMu.Lock()
+	s.connectorQUIC = make(map[string]*quicMetrics, len(connectors))
+	for _, connector := range connectors {
+		s.connectorQUIC[connector.ConnectorID] = &quicMetrics{}
+	}
+	s.quicMu.Unlock()
 }
 
 func (s *Server) ConnectorReady(connectorID, sessionID string) {
@@ -87,10 +111,11 @@ func (s *Server) ConnectorReady(connectorID, sessionID string) {
 	if ok {
 		connector.Ready = true
 		connector.SessionID = sessionID
+		connector.sessionStartedAt = time.Now()
 		s.connectors[connectorID] = connector
 	}
+	s.setConnectorReadinessLocked()
 	s.connectorsMu.Unlock()
-	s.updateReady()
 }
 
 func (s *Server) ConnectorClosed(connectorID, sessionID string) {
@@ -99,10 +124,11 @@ func (s *Server) ConnectorClosed(connectorID, sessionID string) {
 	if ok && connector.SessionID == sessionID {
 		connector.Ready = false
 		connector.SessionID = ""
+		connector.sessionStartedAt = time.Time{}
 		s.connectors[connectorID] = connector
 	}
+	s.setConnectorReadinessLocked()
 	s.connectorsMu.Unlock()
-	s.updateReady()
 }
 
 func (s *Server) Snapshot() Snapshot {
@@ -110,12 +136,26 @@ func (s *Server) Snapshot() Snapshot {
 	connectors := make([]Connector, 0, len(s.connectors))
 	ready := 0
 	for _, connector := range s.connectors {
+		if connector.Ready && !connector.sessionStartedAt.IsZero() {
+			connector.SessionAgeSeconds = max(0, int64(time.Since(connector.sessionStartedAt).Seconds()))
+		}
 		connectors = append(connectors, connector)
 		if connector.Ready {
 			ready++
 		}
 	}
 	s.connectorsMu.RUnlock()
+	s.quicMu.Lock()
+	for index := range connectors {
+		metrics := s.connectorQUIC[connectors[index].ConnectorID]
+		if metrics != nil {
+			connectors[index].QUICSmoothedRTTMicroseconds = metrics.rtt
+			connectors[index].QUICBytesSent = metrics.sent
+			connectors[index].QUICBytesReceived = metrics.received
+			connectors[index].QUICBytesLost = metrics.lost
+		}
+	}
+	s.quicMu.Unlock()
 	slices.SortFunc(connectors, func(left, right Connector) int { return cmp.Compare(left.Slot, right.Slot) })
 	allReady := s.ready.Load()
 	if len(connectors) > 0 {
@@ -124,10 +164,18 @@ func (s *Server) Snapshot() Snapshot {
 	return Snapshot{Version: s.version, Healthy: s.healthy.Load(), Ready: allReady, ConfiguredConnectors: len(connectors), ReadyConnectors: ready, Connectors: connectors}
 }
 
-func (s *Server) updateReady() {
-	if snapshot := s.Snapshot(); snapshot.ConfiguredConnectors > 0 {
-		s.ready.Store(snapshot.Ready)
+func (s *Server) setConnectorReadinessLocked() {
+	if len(s.connectors) == 0 {
+		s.ready.Store(false)
+		return
 	}
+	for _, connector := range s.connectors {
+		if !connector.Ready {
+			s.ready.Store(false)
+			return
+		}
+	}
+	s.ready.Store(true)
 }
 
 type Listener struct {
@@ -140,21 +188,28 @@ func (l *Listener) Close() error {
 }
 
 func (s *Server) ObserveQUIC(ctxDone <-chan struct{}, connection *quic.Conn) {
+	s.observeQUIC("", ctxDone, connection)
+}
+
+// ObserveConnectorQUIC records an independent bounded metric set for a connector.
+func (s *Server) ObserveConnectorQUIC(connectorID string, ctxDone <-chan struct{}, connection *quic.Conn) {
+	s.observeQUIC(connectorID, ctxDone, connection)
+}
+
+func (s *Server) observeQUIC(connectorID string, ctxDone <-chan struct{}, connection *quic.Conn) {
 	s.quicMu.Lock()
-	s.quicObserver++
-	observer := s.quicObserver
-	s.resetQUICMetrics()
+	observer, ok := s.startQUICObserverLocked(connectorID)
 	s.quicMu.Unlock()
+	if !ok {
+		return
+	}
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	var previous quic.ConnectionStats
 	var previousAt time.Time
 	defer func() {
 		s.quicMu.Lock()
-		if s.quicObserver == observer {
-			s.quicObserver++
-			s.resetQUICMetrics()
-		}
+		s.stopQUICObserverLocked(connectorID, observer)
 		s.quicMu.Unlock()
 	}()
 	for {
@@ -169,7 +224,7 @@ func (s *Server) ObserveQUIC(ctxDone <-chan struct{}, connection *quic.Conn) {
 				sendRate = bitsPerSecond(stats.BytesSent, previous.BytesSent, now.Sub(previousAt))
 				receiveRate = bitsPerSecond(stats.BytesReceived, previous.BytesReceived, now.Sub(previousAt))
 			}
-			if !s.storeQUICSample(observer, stats, sendRate, receiveRate) {
+			if !s.storeConnectorQUICSample(connectorID, observer, stats, sendRate, receiveRate) {
 				return
 			}
 			previous = stats
@@ -178,13 +233,60 @@ func (s *Server) ObserveQUIC(ctxDone <-chan struct{}, connection *quic.Conn) {
 	}
 }
 
+func (s *Server) startQUICObserverLocked(connectorID string) (uint64, bool) {
+	if connectorID == "" {
+		s.quicObserver++
+		s.resetQUICMetrics()
+		return s.quicObserver, true
+	}
+	metrics, ok := s.connectorQUIC[connectorID]
+	if !ok {
+		return 0, false
+	}
+	metrics.observer++
+	observer := metrics.observer
+	*metrics = quicMetrics{observer: observer}
+	return observer, true
+}
+
+func (s *Server) stopQUICObserverLocked(connectorID string, observer uint64) {
+	if connectorID == "" {
+		if s.quicObserver == observer {
+			s.quicObserver++
+			s.resetQUICMetrics()
+		}
+		return
+	}
+	metrics := s.connectorQUIC[connectorID]
+	if metrics != nil && metrics.observer == observer {
+		*metrics = quicMetrics{observer: observer + 1}
+	}
+}
+
 func (s *Server) storeQUICStats(observer uint64, stats quic.ConnectionStats) bool {
 	return s.storeQUICSample(observer, stats, 0, 0)
 }
 
 func (s *Server) storeQUICSample(observer uint64, stats quic.ConnectionStats, sendRate, receiveRate uint64) bool {
+	return s.storeConnectorQUICSample("", observer, stats, sendRate, receiveRate)
+}
+
+func (s *Server) storeConnectorQUICSample(connectorID string, observer uint64, stats quic.ConnectionStats, sendRate, receiveRate uint64) bool {
 	s.quicMu.Lock()
 	defer s.quicMu.Unlock()
+	if connectorID != "" {
+		metrics := s.connectorQUIC[connectorID]
+		if metrics == nil || metrics.observer != observer {
+			return false
+		}
+		metrics.rtt = stats.SmoothedRTT.Microseconds()
+		metrics.sent = stats.BytesSent
+		metrics.received = stats.BytesReceived
+		metrics.lost = stats.BytesLost
+		metrics.sendRate = sendRate
+		metrics.receiveRate = receiveRate
+		return true
+	}
 	if s.quicObserver != observer {
 		return false
 	}
@@ -253,8 +355,6 @@ tailbridge_connectors_configured %d
 # HELP tailbridge_connectors_ready Ready connector count.
 # TYPE tailbridge_connectors_ready gauge
 tailbridge_connectors_ready %d
-# HELP tailbridge_connector_ready Whether a configured connector is ready.
-# TYPE tailbridge_connector_ready gauge
 # HELP tailbridge_tcp_flows_active Current active TCP flows.
 # TYPE tailbridge_tcp_flows_active gauge
 tailbridge_tcp_flows_active %d
@@ -291,6 +391,18 @@ tailbridge_quic_send_bits_per_second %d
 # HELP tailbridge_quic_receive_bits_per_second Current QUIC receive throughput in bits per second.
 # TYPE tailbridge_quic_receive_bits_per_second gauge
 tailbridge_quic_receive_bits_per_second %d
+# HELP tailbridge_connector_ready Whether a configured connector is ready.
+# TYPE tailbridge_connector_ready gauge
+# HELP tailbridge_connector_session_age_seconds Age of the active connector session in seconds.
+# TYPE tailbridge_connector_session_age_seconds gauge
+# HELP tailbridge_connector_quic_smoothed_rtt_microseconds Smoothed connector QUIC round-trip time in microseconds.
+# TYPE tailbridge_connector_quic_smoothed_rtt_microseconds gauge
+# HELP tailbridge_connector_quic_bytes_sent Total bytes sent by the connector QUIC connection.
+# TYPE tailbridge_connector_quic_bytes_sent gauge
+# HELP tailbridge_connector_quic_bytes_received Total bytes received by the connector QUIC connection.
+# TYPE tailbridge_connector_quic_bytes_received gauge
+# HELP tailbridge_connector_quic_bytes_lost Total bytes lost by the connector QUIC connection.
+# TYPE tailbridge_connector_quic_bytes_lost gauge
 `, ready, snapshot.ConfiguredConnectors, snapshot.ReadyConnectors, s.active.Load(), s.flows.Load(), s.udpActive.Load(), s.udpFlows.Load(), s.udpDropped.Load(), s.denied.Load(), s.quicRTT.Load(), s.quicSent.Load(), s.quicReceived.Load(), s.quicLost.Load(), s.quicSendRate.Load(), s.quicRecvRate.Load())
 		for _, connector := range snapshot.Connectors {
 			connectorReady := 0
@@ -298,6 +410,11 @@ tailbridge_quic_receive_bits_per_second %d
 				connectorReady = 1
 			}
 			_, _ = fmt.Fprintf(w, "tailbridge_connector_ready{connector_id=%q,slot=%q} %d\n", connector.ConnectorID, fmt.Sprint(connector.Slot), connectorReady)
+			_, _ = fmt.Fprintf(w, "tailbridge_connector_session_age_seconds{connector_id=%q,slot=%q} %d\n", connector.ConnectorID, fmt.Sprint(connector.Slot), connector.SessionAgeSeconds)
+			_, _ = fmt.Fprintf(w, "tailbridge_connector_quic_smoothed_rtt_microseconds{connector_id=%q,slot=%q} %d\n", connector.ConnectorID, fmt.Sprint(connector.Slot), connector.QUICSmoothedRTTMicroseconds)
+			_, _ = fmt.Fprintf(w, "tailbridge_connector_quic_bytes_sent{connector_id=%q,slot=%q} %d\n", connector.ConnectorID, fmt.Sprint(connector.Slot), connector.QUICBytesSent)
+			_, _ = fmt.Fprintf(w, "tailbridge_connector_quic_bytes_received{connector_id=%q,slot=%q} %d\n", connector.ConnectorID, fmt.Sprint(connector.Slot), connector.QUICBytesReceived)
+			_, _ = fmt.Fprintf(w, "tailbridge_connector_quic_bytes_lost{connector_id=%q,slot=%q} %d\n", connector.ConnectorID, fmt.Sprint(connector.Slot), connector.QUICBytesLost)
 		}
 	}))
 	var listenConfig net.ListenConfig

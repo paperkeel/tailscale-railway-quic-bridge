@@ -132,12 +132,16 @@ export function createDigitalOceanEdge(
 			certificates.edgeCertB64,
 			certificates.edgeKeyB64,
 			tailscaleAuthKey,
+			...args.connectors.map((connector) => connector.environment),
 		])
-		.apply(([caCertB64, edgeCertB64, edgeKeyB64, authKey]) =>
+		.apply(([caCertB64, edgeCertB64, edgeKeyB64, authKey, ...environments]) =>
 			renderEdgeEnvironment({
 				edgeId: args.edgeId,
 				environment: args.stage,
-				connectors: args.connectors,
+				connectors: args.connectors.map((connector, index) => ({
+					...connector,
+					environment: environments[index],
+				})),
 				caCertB64,
 				edgeCertB64,
 				edgeKeyB64,
@@ -156,12 +160,13 @@ export function createDigitalOceanEdge(
 		{ parent: args.parent, dependsOn: prepare },
 	);
 
-	const environmentUpload = new command.remote.CopyToRemote(
+	const environmentUpload = new command.remote.Command(
 		`${args.name}-edge-environment`,
 		{
 			connection,
-			remotePath: `${deploymentDirectory}/edge.env`,
-			source: environment.apply((value) => new pulumi.asset.StringAsset(value)),
+			create: installEnvironmentCommand,
+			update: installEnvironmentCommand,
+			stdin: environment,
 			triggers: [environment.apply((value) => deploymentHash(value))],
 		},
 		{ parent: args.parent, dependsOn: prepare },
@@ -201,8 +206,11 @@ function physicalName(stage: string, maximumLength = 63): string {
 }
 
 function prepareCommand(volumeName: pulumi.Output<string>): pulumi.Output<string> {
-	return volumeName.apply(
-		(name) => `set -eu
+	return volumeName.apply(prepareScript);
+}
+
+export function prepareScript(name: string): string {
+	return `set -eu
 cloud-init status --wait
 device=/dev/disk/by-id/scsi-0DO_Volume_${name}
 for attempt in $(seq 1 60); do
@@ -218,9 +226,21 @@ if ! grep -Fq "LABEL=${volumeLabel} ${stateDirectory} ext4 defaults,nofail 0 2" 
   printf '%s\n' "LABEL=${volumeLabel} ${stateDirectory} ext4 defaults,nofail 0 2" >> /etc/fstab
 fi
 install -d -m 0700 ${stateDirectory}/tailscale ${deploymentDirectory}
-`,
-	);
+if test -e ${deploymentDirectory}/edge.env; then
+  chmod 0600 ${deploymentDirectory}/edge.env
+fi
+`;
 }
+
+const installEnvironmentCommand = `set -eu
+umask 077
+temporary=$(mktemp ${deploymentDirectory}/edge.env.XXXXXX)
+trap 'rm -f "$temporary"' EXIT
+cat > "$temporary"
+chmod 0600 "$temporary"
+mv -f "$temporary" ${deploymentDirectory}/edge.env
+trap - EXIT
+`;
 
 const deployCommand = `set -eu
 chmod 0600 ${deploymentDirectory}/edge.env
