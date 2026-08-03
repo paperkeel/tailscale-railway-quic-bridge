@@ -1,0 +1,6 @@
+path=direct
+latency_samples=53
+latency_mean_ms=132.536
+latency_p50_ms=130.330000
+latency_p95_ms=148.100000
+throughput_mbps=0.096

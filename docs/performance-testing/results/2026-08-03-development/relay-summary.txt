@@ -1,0 +1,6 @@
+path=relay
+latency_samples=51
+latency_mean_ms=155.174
+latency_p50_ms=153.159000
+latency_p95_ms=159.080000
+throughput_mbps=158.030
