@@ -47,7 +47,7 @@ func TestForwardTCPRewritesQueriesAndResponses(t *testing.T) {
 		done <- err
 	}()
 	go func() {
-		defer upstream.Close()
+		defer func() { _ = upstream.Close() }()
 		request, err := readTCPMessage(upstream)
 		if err != nil {
 			return
