@@ -108,6 +108,7 @@ jobs:
           export TAILBRIDGE_CONNECTOR_IMAGE="ghcr.io/bearfire-dev/tailscale-railway-quic-bridge-connector@$connector_digest"
           pnpm version "$version" --no-git-tag-version
           pnpm build:metadata
+          pnpm build:package
           pnpm pack --pack-destination "$RUNNER_TEMP"
       - name: Test the packed package
         env:
@@ -118,8 +119,9 @@ jobs:
           test_directory="$RUNNER_TEMP/package-test"
           mkdir -p "$test_directory"
           printf '%s\n' '{"private":true,"type":"module"}' > "$test_directory/package.json"
-          pnpm --dir "$test_directory" add "$package"
-          pnpm --dir "$test_directory" exec node --input-type=module --eval \
+          pnpm --dir "$test_directory" add --ignore-scripts "$package"
+          cd "$test_directory"
+          node --input-type=module --eval \
             "const module = await import('@bearfire-dev/tailscale-railway-quic-bridge'); if (typeof module.Tailbridge !== 'function') process.exit(1)"
       - name: Publish the package
         env:

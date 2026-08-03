@@ -3,18 +3,16 @@
 	"version": "0.0.0-development",
 	"private": false,
 	"type": "module",
-	"main": "./infra/index.ts",
-	"types": "./infra/index.ts",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
 	"exports": {
 		".": {
-			"types": "./infra/index.ts",
-			"import": "./infra/index.ts"
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
 		}
 	},
 	"files": [
-		"infra",
-		"Dockerfile.connector",
-		"Dockerfile.edge"
+		"dist"
 	],
 	"packageManager": "pnpm@10.34.5",
 	"engines": {
@@ -23,6 +21,8 @@
 	},
 	"scripts": {
 		"build:metadata": "node infra/generate-build.mjs",
+		"build:package": "tsup infra/index.ts --format esm --dts --clean && cp infra/edge/compose.yml dist/compose.yml",
+		"prepack": "pnpm build:package",
 		"check:infra": "sst install && tsc --noEmit",
 		"test:infra": "vitest run",
 		"diff": "sst diff",
@@ -39,6 +39,7 @@
 	},
 	"devDependencies": {
 		"@types/node": "26.1.2",
+		"tsup": "8.5.0",
 		"typescript": "6.0.3",
 		"vitest": "4.1.10"
 	}
