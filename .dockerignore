@@ -4,6 +4,8 @@ docs
 test
 coverage.out
 .coverage
+.sst
+node_modules
 dist
 private/
 *.env

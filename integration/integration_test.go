@@ -39,16 +39,17 @@ import (
 )
 
 const (
-	edgeNamespace    = "tailbridge-edge-test"
-	backendNamespace = "tailbridge-backend-test"
-	clientInterface  = "tbclient0"
-	backendInterface = "tbbackend0"
-	edgeAddress      = "fd42:100::2"
-	clientAddress    = "fd42:100::1"
-	backendLink      = "fd42:300::2"
-	hostBackendLink  = "fd42:300::1"
-	serviceAddress   = "fd42:200::2"
-	servicePort      = 18080
+	edgeNamespace         = "tailbridge-edge-test"
+	backendNamespace      = "tailbridge-backend-test"
+	clientInterface       = "tbclient0"
+	backendInterface      = "tbbackend0"
+	edgeAddress           = "fd42:100::2"
+	clientAddress         = "fd42:100::1"
+	backendLink           = "fd42:300::2"
+	hostBackendLink       = "fd42:300::1"
+	serviceAddress        = "fd42:200::2"
+	virtualServiceAddress = "fd20:200::2"
+	servicePort           = 18080
 )
 
 func TestBridgeIntegration(t *testing.T) {
@@ -64,7 +65,15 @@ func TestBridgeIntegration(t *testing.T) {
 	// Docker gives this test a disposable client network namespace. The test
 	// adds separate edge and backend namespaces inside that container.
 	edgeConfig := config.Edge{
-		Common:          edgeCommon,
+		Common: edgeCommon,
+		Connectors: []config.ConnectorTarget{{
+			ConnectorID:   "integration",
+			Environment:   "test",
+			Slot:          0,
+			VirtualPrefix: netip.MustParsePrefix("fd20::/16"),
+			RealPrefix:    netip.MustParsePrefix("fd42::/16"),
+			DNSSuffix:     "integration.railway.internal",
+		}},
 		QUICListenAddr:  "[" + edgeAddress + "]:4433",
 		TCPListenAddr:   "[::]:15001",
 		UDPListenAddr:   "[::]:15002",
@@ -77,6 +86,9 @@ func TestBridgeIntegration(t *testing.T) {
 	connectorConfig := config.Connector{
 		Common:              connectorCommon,
 		EdgeEndpoint:        "[" + edgeAddress + "]:4433",
+		VirtualPrefix:       netip.MustParsePrefix("fd20::/16"),
+		RealPrefix:          netip.MustParsePrefix("fd42::/16"),
+		DNSSuffix:           "integration.railway.internal",
 		AllowedDestinations: []netip.Prefix{netip.MustParsePrefix(serviceAddress + "/128")},
 		MaxTCPFlows:         128,
 		MaxUDPFlows:         32,
@@ -100,11 +112,11 @@ func TestBridgeIntegration(t *testing.T) {
 	}
 	waitForUDP(t, udpPayload, 10*time.Second)
 	assertOversizedUDPRejected(t)
-	if err := exchangeTCPAt("fd42:200::3", []byte("denied route")); err == nil {
+	if err := exchangeTCPAt("fd20:200::3", []byte("denied route")); err == nil {
 		t.Fatal("TCP reached a route that the connector did not advertise")
 	}
 
-	persistent, err := net.DialTimeout("tcp6", net.JoinHostPort(serviceAddress, fmt.Sprint(servicePort)), time.Second)
+	persistent, err := net.DialTimeout("tcp6", net.JoinHostPort(virtualServiceAddress, fmt.Sprint(servicePort)), time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,7 +287,7 @@ func setupNetwork(t *testing.T) {
 	run(t, "ip", "-n", backendNamespace, "link", "set", "uplink0", "up")
 
 	run(t, "sysctl", "-q", "-w", "net.ipv6.conf.all.forwarding=1")
-	run(t, "ip", "-6", "route", "add", "fd42:200::/64", "via", edgeAddress, "dev", clientInterface)
+	run(t, "ip", "-6", "route", "add", "fd20:200::/64", "via", edgeAddress, "dev", clientInterface)
 	run(t, "ip", "-n", edgeNamespace, "-6", "route", "add", "fd42:300::/64", "via", clientAddress, "dev", "tailscale0")
 	run(t, "ip", "-n", backendNamespace, "-6", "route", "add", "default", "via", hostBackendLink, "dev", "uplink0")
 }
@@ -357,7 +369,7 @@ func waitForTCP(t *testing.T, payload []byte, timeout time.Duration) {
 }
 
 func exchangeTCP(payload []byte) error {
-	return exchangeTCPAt(serviceAddress, payload)
+	return exchangeTCPAt(virtualServiceAddress, payload)
 }
 
 func exchangeTCPAt(address string, payload []byte) error {
@@ -436,7 +448,7 @@ func waitForUDP(t *testing.T, payload []byte, timeout time.Duration) {
 }
 
 func exchangeUDP(payload []byte) error {
-	address, err := net.ResolveUDPAddr("udp6", net.JoinHostPort(serviceAddress, fmt.Sprint(servicePort)))
+	address, err := net.ResolveUDPAddr("udp6", net.JoinHostPort(virtualServiceAddress, fmt.Sprint(servicePort)))
 	if err != nil {
 		return err
 	}
@@ -462,7 +474,7 @@ func exchangeUDP(payload []byte) error {
 
 func assertOversizedUDPRejected(t *testing.T) {
 	t.Helper()
-	address, err := net.ResolveUDPAddr("udp6", net.JoinHostPort(serviceAddress, fmt.Sprint(servicePort)))
+	address, err := net.ResolveUDPAddr("udp6", net.JoinHostPort(virtualServiceAddress, fmt.Sprint(servicePort)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -479,7 +491,7 @@ func assertOversizedUDPRejected(t *testing.T) {
 
 func stressUDP(t *testing.T, datagrams int, timeout time.Duration) {
 	t.Helper()
-	address, err := net.ResolveUDPAddr("udp6", net.JoinHostPort(serviceAddress, fmt.Sprint(servicePort)))
+	address, err := net.ResolveUDPAddr("udp6", net.JoinHostPort(virtualServiceAddress, fmt.Sprint(servicePort)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -569,7 +581,7 @@ func credentials(t *testing.T) (config.Common, config.Common) {
 	edgeCertificate, edgeKey := leafCertificate(t, ca, caKey, "edge", x509.ExtKeyUsageServerAuth, 2)
 	connectorCertificate, connectorKey := leafCertificate(t, ca, caKey, "connector", x509.ExtKeyUsageClientAuth, 3)
 	common := func(certificate, key []byte) config.Common {
-		return config.Common{ConnectorID: "integration", Environment: "test", CABundle: caPEM, Certificate: certificate, PrivateKey: key, LogLevel: "debug"}
+		return config.Common{EdgeID: "integration", ConnectorID: "integration", Environment: "test", CABundle: caPEM, Certificate: certificate, PrivateKey: key, LogLevel: "debug"}
 	}
 	return common(edgeCertificate, edgeKey), common(connectorCertificate, connectorKey)
 }

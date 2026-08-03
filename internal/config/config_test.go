@@ -333,3 +333,37 @@ func TestEdgeRejectsDuplicateConnectorSlots(t *testing.T) {
 		t.Fatal("LoadEdge() accepted duplicate connector slots")
 	}
 }
+
+func TestConnectorTargetsRejectInvalidRegistries(t *testing.T) {
+	valid := `{"connectorId":"one","environment":"production","slot":0,"virtualPrefix":"fd20::/16","realPrefix":"fd12::/16","dnsSuffix":"one.railway.internal"}`
+	tests := []struct {
+		name    string
+		payload string
+		raw     bool
+	}{
+		{name: "missing", payload: "", raw: true},
+		{name: "base64", payload: "not-base64", raw: true},
+		{name: "malformed JSON", payload: `[`},
+		{name: "trailing JSON", payload: `[` + valid + `] {}`},
+		{name: "empty", payload: `[]`},
+		{name: "too many", payload: `[` + strings.TrimSuffix(strings.Repeat(valid+`,`, 33), `,`) + `]`},
+		{name: "invalid identity", payload: `[{"connectorId":"bad name","environment":"production","slot":0,"virtualPrefix":"fd20::/16","realPrefix":"fd12::/16","dnsSuffix":"one.railway.internal"}]`},
+		{name: "invalid slot", payload: `[{"connectorId":"one","environment":"production","slot":32,"virtualPrefix":"fd20::/16","realPrefix":"fd12::/16","dnsSuffix":"one.railway.internal"}]`},
+		{name: "invalid virtual prefix", payload: `[{"connectorId":"one","environment":"production","slot":0,"virtualPrefix":"fd12::/16","realPrefix":"fd12::/16","dnsSuffix":"one.railway.internal"}]`},
+		{name: "slot mismatch", payload: `[{"connectorId":"one","environment":"production","slot":1,"virtualPrefix":"fd20::/16","realPrefix":"fd12::/16","dnsSuffix":"one.railway.internal"}]`},
+		{name: "invalid real prefix", payload: `[{"connectorId":"one","environment":"production","slot":0,"virtualPrefix":"fd20::/16","realPrefix":"fd12::/24","dnsSuffix":"one.railway.internal"}]`},
+		{name: "invalid suffix", payload: `[{"connectorId":"one","environment":"production","slot":0,"virtualPrefix":"fd20::/16","realPrefix":"fd12::/16","dnsSuffix":"railway.internal"}]`},
+		{name: "duplicate identity", payload: `[` + valid + `,` + strings.Replace(valid, `"slot":0,"virtualPrefix":"fd20`, `"slot":1,"virtualPrefix":"fd21`, 1) + `]`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			encoded := base64.StdEncoding.EncodeToString([]byte(test.payload))
+			if test.raw {
+				encoded = test.payload
+			}
+			if _, err := connectorTargets(encoded); err == nil {
+				t.Fatal("connectorTargets() accepted an invalid registry")
+			}
+		})
+	}
+}
