@@ -23,10 +23,14 @@ measure_latency() {
 	printf 'sequence,http_code,connect_seconds,start_transfer_seconds,total_seconds\n' > "$output_file"
 	while (( SECONDS < deadline )); do
 		sequence=$((sequence + 1))
-		curl --silent --show-error --output /dev/null \
+		local result
+		if ! result=$(curl --silent --show-error --output /dev/null \
 			--connect-timeout 5 --max-time 10 \
 			--write-out "$sequence,%{http_code},%{time_connect},%{time_starttransfer},%{time_total}\n" \
-			"$base_url/ping" >> "$output_file"
+			"$base_url/ping"); then
+			result=${result:-"$sequence,000,0,0,0"}
+		fi
+		printf '%s\n' "$result" >> "$output_file"
 		sleep 1
 	done
 }
@@ -60,12 +64,20 @@ summarize() {
 	local p95_ms
 	local throughput_mbps
 
-	samples=$(tail -n +2 "$latency_file" | wc -l)
-	mean_ms=$(tail -n +2 "$latency_file" | awk -F, '{sum += $5 * 1000} END {printf "%.3f", sum / NR}')
-	mapfile -t sorted < <(tail -n +2 "$latency_file" | awk -F, '{printf "%.6f\n", $5 * 1000}' | sort -n)
+	samples=$(awk -F, '$2 == 204 {count++} END {print count + 0}' "$latency_file")
+	if (( samples == 0 )); then
+		echo "The $name path did not return a successful latency sample." >&2
+		return 1
+	fi
+	mean_ms=$(awk -F, '$2 == 204 {sum += $5 * 1000; count++} END {printf "%.3f", sum / count}' "$latency_file")
+	mapfile -t sorted < <(awk -F, '$2 == 204 {printf "%.6f\n", $5 * 1000}' "$latency_file" | sort -n)
 	p50_ms=${sorted[$(((samples - 1) * 50 / 100))]}
 	p95_ms=${sorted[$(((samples - 1) * 95 / 100))]}
-	throughput_mbps=$(tail -n 1 "$throughput_file" | awk -F, '{printf "%.3f", $4 * 8 / 1000000}')
+	throughput_mbps=$(awk -F, '$1 == 200 {value = $4 * 8 / 1000000; found = 1} END {if (found) printf "%.3f", value}' "$throughput_file")
+	if [[ -z $throughput_mbps ]]; then
+		echo "The $name path did not return a successful throughput sample." >&2
+		return 1
+	fi
 	{
 		printf 'path=%s\n' "$name"
 		printf 'latency_samples=%s\n' "$samples"

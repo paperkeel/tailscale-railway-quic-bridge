@@ -20,9 +20,16 @@ client, or enforce the `UseTailscaleSubnets` system policy on supported managed
 clients. Tailscale does not provide a tailnet policy setting that changes this
 default for every unmanaged Linux client.
 
-7. Get the Railway IPv6 address from `ip -j addr` in the test service.
+7. Get the `fd12::/16` Railway private IPv6 address from `ip -j addr` in the test service.
 8. Get the direct Tailscale address from `tailscale ip -4` in the test service.
-9. Run the comparison script with both addresses.
+9. Confirm that both health requests return `ready`.
+
+```bash
+curl http://DIRECT_TAILSCALE_IP:8080/healthz
+curl -g 'http://[RAILWAY_IPV6_ADDRESS]:8080/healthz'
+```
+
+10. Run the comparison script with both addresses.
 
 ```bash
 performance-test/run-comparison.sh \

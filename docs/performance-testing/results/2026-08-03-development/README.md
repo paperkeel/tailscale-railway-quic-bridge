@@ -2,7 +2,7 @@
 
 ## Result
 
-Tailbridge carried the full HTTP response through the approved Railway IPv6 route.
+Tailbridge carried HTTP traffic through the approved Railway IPv6 route.
 
 | Path | Samples | Mean latency | P50 latency | P95 latency | Throughput |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -42,6 +42,8 @@ The direct path changed from DERP to a direct peer path after the benchmark. The
 - The two summary files contain the calculated values in the table.
 
 The direct transfer received 719,356 bytes before the 60-second limit. The relay transfer received 1,185,209,461 bytes before the same limit.
+
+Neither transfer completed the generated 16 GiB response before the limit.
 
 ## Reproduction
 
