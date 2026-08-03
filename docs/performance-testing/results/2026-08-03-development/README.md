@@ -13,6 +13,23 @@ The relay added 22.638 ms to the mean application latency. It delivered approxim
 
 These results apply only to this test setup. They are not a general Tailscale or Railway benchmark.
 
+## Connector-to-edge latency
+
+The edge sampled the QUIC connection statistics every five seconds for one minute.
+The 12 samples measured the connection between DigitalOcean SFO3 and Railway
+`us-west2`.
+
+| Samples | Mean RTT | Minimum RTT | Maximum RTT | Target |
+| ---: | ---: | ---: | ---: | ---: |
+| 12 | 2.208 ms | 2.187 ms | 2.219 ms | Less than 25 ms |
+
+All samples met the target. The measured connector-to-edge RTT was approximately
+1.4 percent of the 155.174 ms relay application latency.
+
+The result shows that the QUIC connection did not cause most of the application
+latency. The application measurement also included the client, Tailscale subnet
+route, TCP setup, HTTP processing, and Railway service path.
+
 ## Test setup
 
 - Date: 2026-08-03 UTC
@@ -39,6 +56,7 @@ The direct path changed from DERP to a direct peer path after the benchmark. The
 - `direct-throughput.csv` contains the direct transfer result.
 - `relay-latency.csv` contains all relay latency samples.
 - `relay-throughput.csv` contains the relay transfer result.
+- `connector-quic-rtt.csv` contains the connector-to-edge RTT samples.
 - The two summary files contain the calculated values in the table.
 
 The direct transfer received 719,356 bytes before the 60-second limit. The relay transfer received 1,185,209,461 bytes before the same limit.

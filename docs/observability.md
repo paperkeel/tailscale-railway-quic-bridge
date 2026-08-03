@@ -42,6 +42,45 @@ The Prometheus endpoint reports these metrics:
 | `tailbridge_quic_bytes_sent` | Gauge | Reports bytes sent by the current QUIC connection. |
 | `tailbridge_quic_bytes_received` | Gauge | Reports bytes received by the current QUIC connection. |
 | `tailbridge_quic_bytes_lost` | Gauge | Reports bytes lost by the current QUIC connection. |
+| `tailbridge_quic_send_bits_per_second` | Gauge | Reports the five-second QUIC send rate. |
+| `tailbridge_quic_receive_bits_per_second` | Gauge | Reports the five-second QUIC receive rate. |
+
+The QUIC RTT excludes the client, Tailscale subnet path, and destination service.
+Use this PromQL expression to graph connector-to-edge latency in milliseconds:
+
+```promql
+tailbridge_quic_smoothed_rtt_microseconds / 1000
+```
+
+Use this expression to show whether the RTT meets a 25 ms target:
+
+```promql
+tailbridge_quic_smoothed_rtt_microseconds < bool 25000
+```
+
+Scrape `/metrics` every five seconds to keep the same resolution as the internal
+QUIC observer. Use this alert for a sustained target violation:
+
+```yaml
+- alert: TailbridgeConnectorRTTHigh
+  expr: tailbridge_ready == 1 and tailbridge_quic_smoothed_rtt_microseconds > 25000
+  for: 1m
+  labels:
+    severity: warning
+  annotations:
+    summary: Tailbridge connector RTT is above 25 ms
+```
+
+Use these expressions to graph observed QUIC traffic in megabits per second:
+
+```promql
+tailbridge_quic_send_bits_per_second / 1000000
+tailbridge_quic_receive_bits_per_second / 1000000
+```
+
+The throughput gauges measure actual QUIC traffic. They do not run synthetic
+traffic and do not measure unused connection capacity. A synthetic test can
+compete with production traffic and change the result that it measures.
 
 Each Tailbridge component limits concurrent UDP flows with `TB_MAX_UDP_FLOWS`.
 

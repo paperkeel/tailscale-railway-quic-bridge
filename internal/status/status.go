@@ -25,6 +25,8 @@ type Server struct {
 	quicSent     atomic.Uint64
 	quicReceived atomic.Uint64
 	quicLost     atomic.Uint64
+	quicSendRate atomic.Uint64
+	quicRecvRate atomic.Uint64
 	quicMu       sync.Mutex
 	quicObserver uint64
 	version      string
@@ -56,6 +58,8 @@ func (s *Server) ObserveQUIC(ctxDone <-chan struct{}, connection *quic.Conn) {
 	s.quicMu.Unlock()
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
+	var previous quic.ConnectionStats
+	var previousAt time.Time
 	defer func() {
 		s.quicMu.Lock()
 		if s.quicObserver == observer {
@@ -70,14 +74,26 @@ func (s *Server) ObserveQUIC(ctxDone <-chan struct{}, connection *quic.Conn) {
 			return
 		case <-ticker.C:
 			stats := connection.ConnectionStats()
-			if !s.storeQUICStats(observer, stats) {
+			now := time.Now()
+			var sendRate, receiveRate uint64
+			if !previousAt.IsZero() {
+				sendRate = bitsPerSecond(stats.BytesSent, previous.BytesSent, now.Sub(previousAt))
+				receiveRate = bitsPerSecond(stats.BytesReceived, previous.BytesReceived, now.Sub(previousAt))
+			}
+			if !s.storeQUICSample(observer, stats, sendRate, receiveRate) {
 				return
 			}
+			previous = stats
+			previousAt = now
 		}
 	}
 }
 
 func (s *Server) storeQUICStats(observer uint64, stats quic.ConnectionStats) bool {
+	return s.storeQUICSample(observer, stats, 0, 0)
+}
+
+func (s *Server) storeQUICSample(observer uint64, stats quic.ConnectionStats, sendRate, receiveRate uint64) bool {
 	s.quicMu.Lock()
 	defer s.quicMu.Unlock()
 	if s.quicObserver != observer {
@@ -87,7 +103,16 @@ func (s *Server) storeQUICStats(observer uint64, stats quic.ConnectionStats) boo
 	s.quicSent.Store(stats.BytesSent)
 	s.quicReceived.Store(stats.BytesReceived)
 	s.quicLost.Store(stats.BytesLost)
+	s.quicSendRate.Store(sendRate)
+	s.quicRecvRate.Store(receiveRate)
 	return true
+}
+
+func bitsPerSecond(current, previous uint64, elapsed time.Duration) uint64 {
+	if current < previous || elapsed <= 0 {
+		return 0
+	}
+	return uint64(float64(current-previous) * 8 / elapsed.Seconds())
 }
 
 func (s *Server) resetQUICMetrics() {
@@ -95,6 +120,8 @@ func (s *Server) resetQUICMetrics() {
 	s.quicSent.Store(0)
 	s.quicReceived.Store(0)
 	s.quicLost.Store(0)
+	s.quicSendRate.Store(0)
+	s.quicRecvRate.Store(0)
 }
 
 func (s *Server) Listen(addr string) (*Listener, error) {
@@ -150,7 +177,13 @@ tailbridge_quic_bytes_received %d
 # HELP tailbridge_quic_bytes_lost Total bytes lost by the current QUIC connection.
 # TYPE tailbridge_quic_bytes_lost gauge
 tailbridge_quic_bytes_lost %d
-`, ready, s.active.Load(), s.flows.Load(), s.udpActive.Load(), s.udpFlows.Load(), s.udpDropped.Load(), s.denied.Load(), s.quicRTT.Load(), s.quicSent.Load(), s.quicReceived.Load(), s.quicLost.Load())
+# HELP tailbridge_quic_send_bits_per_second Current QUIC send throughput in bits per second.
+# TYPE tailbridge_quic_send_bits_per_second gauge
+tailbridge_quic_send_bits_per_second %d
+# HELP tailbridge_quic_receive_bits_per_second Current QUIC receive throughput in bits per second.
+# TYPE tailbridge_quic_receive_bits_per_second gauge
+tailbridge_quic_receive_bits_per_second %d
+`, ready, s.active.Load(), s.flows.Load(), s.udpActive.Load(), s.udpFlows.Load(), s.udpDropped.Load(), s.denied.Load(), s.quicRTT.Load(), s.quicSent.Load(), s.quicReceived.Load(), s.quicLost.Load(), s.quicSendRate.Load(), s.quicRecvRate.Load())
 	}))
 	var listenConfig net.ListenConfig
 	listener, err := listenConfig.Listen(context.Background(), "tcp", addr)

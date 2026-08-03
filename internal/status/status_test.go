@@ -89,6 +89,8 @@ func TestListenerServesStatusAndStopsWithContext(t *testing.T) {
 		"tailbridge_quic_bytes_sent",
 		"tailbridge_quic_bytes_received",
 		"tailbridge_quic_bytes_lost",
+		"tailbridge_quic_send_bits_per_second",
+		"tailbridge_quic_receive_bits_per_second",
 	} {
 		if !strings.Contains(metrics, "# HELP "+name+" ") {
 			t.Errorf("metrics do not contain HELP for %s", name)
@@ -189,10 +191,12 @@ func TestObserveQUICClearsMetricsAfterDisconnect(t *testing.T) {
 	state.quicSent.Store(20)
 	state.quicReceived.Store(30)
 	state.quicLost.Store(40)
+	state.quicSendRate.Store(50)
+	state.quicRecvRate.Store(60)
 	done := make(chan struct{})
 	close(done)
 	state.ObserveQUIC(done, nil)
-	if state.quicRTT.Load() != 0 || state.quicSent.Load() != 0 || state.quicReceived.Load() != 0 || state.quicLost.Load() != 0 {
+	if state.quicRTT.Load() != 0 || state.quicSent.Load() != 0 || state.quicReceived.Load() != 0 || state.quicLost.Load() != 0 || state.quicSendRate.Load() != 0 || state.quicRecvRate.Load() != 0 {
 		t.Fatal("ObserveQUIC() kept metrics after the current connection closed")
 	}
 }
@@ -218,6 +222,8 @@ func TestOlderQUICObserverDoesNotClearCurrentMetrics(t *testing.T) {
 	state.quicSent.Store(20)
 	state.quicReceived.Store(30)
 	state.quicLost.Store(40)
+	state.quicSendRate.Store(50)
+	state.quicRecvRate.Store(60)
 
 	close(olderDone)
 	select {
@@ -225,7 +231,7 @@ func TestOlderQUICObserverDoesNotClearCurrentMetrics(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("the older QUIC observer did not stop")
 	}
-	if state.quicRTT.Load() != 10 || state.quicSent.Load() != 20 || state.quicReceived.Load() != 30 || state.quicLost.Load() != 40 {
+	if state.quicRTT.Load() != 10 || state.quicSent.Load() != 20 || state.quicReceived.Load() != 30 || state.quicLost.Load() != 40 || state.quicSendRate.Load() != 50 || state.quicRecvRate.Load() != 60 {
 		t.Fatal("the older QUIC observer cleared the current metrics")
 	}
 
@@ -235,8 +241,32 @@ func TestOlderQUICObserverDoesNotClearCurrentMetrics(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("the current QUIC observer did not stop")
 	}
-	if state.quicRTT.Load() != 0 || state.quicSent.Load() != 0 || state.quicReceived.Load() != 0 || state.quicLost.Load() != 0 {
+	if state.quicRTT.Load() != 0 || state.quicSent.Load() != 0 || state.quicReceived.Load() != 0 || state.quicLost.Load() != 0 || state.quicSendRate.Load() != 0 || state.quicRecvRate.Load() != 0 {
 		t.Fatal("the current QUIC observer kept metrics after it stopped")
+	}
+}
+
+func TestStoreQUICSampleStoresRates(t *testing.T) {
+	state := New("test")
+	state.quicObserver = 1
+	stats := quic.ConnectionStats{BytesSent: 20, BytesReceived: 30}
+	if !state.storeQUICSample(1, stats, 40, 50) {
+		t.Fatal("storeQUICSample() rejected the current observer")
+	}
+	if state.quicSendRate.Load() != 40 || state.quicRecvRate.Load() != 50 {
+		t.Fatal("storeQUICSample() did not store the throughput rates")
+	}
+}
+
+func TestBitsPerSecond(t *testing.T) {
+	if got := bitsPerSecond(1_100, 100, time.Second); got != 8_000 {
+		t.Fatalf("bitsPerSecond() = %d, want 8000", got)
+	}
+	if got := bitsPerSecond(100, 1_100, time.Second); got != 0 {
+		t.Fatalf("bitsPerSecond() after reset = %d, want 0", got)
+	}
+	if got := bitsPerSecond(1_100, 100, 0); got != 0 {
+		t.Fatalf("bitsPerSecond() without elapsed time = %d, want 0", got)
 	}
 }
 
