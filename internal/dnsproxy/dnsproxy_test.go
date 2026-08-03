@@ -145,6 +145,7 @@ func TestResponseRewritesServiceBindingAddressHints(t *testing.T) {
 		Priority: 1,
 		Target:   "target.railway.internal.",
 		Value: []dns.SVCBKeyValue{
+			&dns.SVCBMandatory{Code: []dns.SVCBKey{dns.SVCB_IPV4HINT, dns.SVCB_IPV6HINT}},
 			&dns.SVCBIPv4Hint{Hint: []net.IP{net.ParseIP("192.0.2.1")}},
 			&dns.SVCBIPv6Hint{Hint: []net.IP{net.ParseIP("fd12:3456::42"), net.ParseIP("2001:db8::1")}},
 		},
@@ -161,10 +162,14 @@ func TestResponseRewritesServiceBindingAddressHints(t *testing.T) {
 	if https.Target != "target.project.railway.internal." {
 		t.Fatalf("target = %q", https.Target)
 	}
-	if len(https.Value) != 1 {
-		t.Fatalf("service binding values = %v, want only IPv6 hints", https.Value)
+	if len(https.Value) != 2 {
+		t.Fatalf("service binding values = %v, want mandatory and IPv6 hints", https.Value)
 	}
-	hints := https.Value[0].(*dns.SVCBIPv6Hint).Hint
+	mandatory := https.Value[0].(*dns.SVCBMandatory)
+	if len(mandatory.Code) != 1 || mandatory.Code[0] != dns.SVCB_IPV6HINT {
+		t.Fatalf("mandatory keys = %v, want only ipv6hint", mandatory.Code)
+	}
+	hints := https.Value[1].(*dns.SVCBIPv6Hint).Hint
 	if len(hints) != 1 || hints[0].String() != "fd20:3456::42" {
 		t.Fatalf("IPv6 hints = %v", hints)
 	}

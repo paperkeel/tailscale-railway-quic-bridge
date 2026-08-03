@@ -164,7 +164,29 @@ func (r *Rewriter) rewriteSVCBValues(values []dns.SVCBKeyValue) []dns.SVCBKeyVal
 		}
 		result = append(result, value)
 	}
-	return result
+	present := make(map[dns.SVCBKey]struct{}, len(result))
+	for _, value := range result {
+		present[value.Key()] = struct{}{}
+	}
+	reconciled := result[:0]
+	for _, value := range result {
+		mandatory, ok := value.(*dns.SVCBMandatory)
+		if !ok {
+			reconciled = append(reconciled, value)
+			continue
+		}
+		codes := mandatory.Code[:0]
+		for _, code := range mandatory.Code {
+			if _, exists := present[code]; exists {
+				codes = append(codes, code)
+			}
+		}
+		if len(codes) != 0 {
+			mandatory.Code = codes
+			reconciled = append(reconciled, mandatory)
+		}
+	}
+	return reconciled
 }
 
 func (r *Rewriter) responseName(name string) string {
