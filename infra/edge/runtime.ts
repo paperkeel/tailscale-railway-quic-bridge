@@ -114,7 +114,10 @@ export function edgeImageReference(image: string): string {
 	}
 	if (image.includes("@")) {
 		const [repository, digest, extra] = image.split("@");
-		if (extra !== undefined || !isRepository(repository)) {
+		if (
+			extra !== undefined ||
+			(!isRepository(repository) && !isTaggedRepository(repository))
+		) {
 			throw new Error("The edge image reference is invalid.");
 		}
 		validateDigest(digest);

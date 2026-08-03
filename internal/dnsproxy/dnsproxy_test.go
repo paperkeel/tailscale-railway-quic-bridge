@@ -165,7 +165,7 @@ func TestResponseRewritesServiceBindingAddressHints(t *testing.T) {
 		t.Fatalf("service binding values = %v, want only IPv6 hints", https.Value)
 	}
 	hints := https.Value[0].(*dns.SVCBIPv6Hint).Hint
-	if hints[0].String() != "fd20:3456::42" || hints[1].String() != "2001:db8::1" {
+	if len(hints) != 1 || hints[0].String() != "fd20:3456::42" {
 		t.Fatalf("IPv6 hints = %v", hints)
 	}
 }

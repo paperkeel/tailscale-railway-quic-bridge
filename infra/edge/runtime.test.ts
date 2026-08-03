@@ -67,6 +67,9 @@ describe("edge runtime rendering", () => {
 		expect(renderCompose("registry.example/edge:v1", template)).toBe(
 			"image: registry.example/edge:v1\n",
 		);
+		expect(
+			renderCompose(`registry.example/edge:v1@${digest}`, template),
+		).toBe(`image: registry.example/edge:v1@${digest}\n`);
 		expect(renderCompose("tailbridge-edge:test", template)).toBe(
 			"image: tailbridge-edge:test\n",
 		);

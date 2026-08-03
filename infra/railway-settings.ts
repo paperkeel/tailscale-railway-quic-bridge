@@ -51,6 +51,21 @@ export async function requestRailwayGraphql<T>(
 		);
 	}
 	const result = parsed as GraphqlResponse<T>;
+	if (
+		result.errors !== undefined &&
+		(!Array.isArray(result.errors) ||
+			result.errors.length === 0 ||
+			result.errors.some(
+				(error) =>
+					typeof error !== "object" ||
+					error === null ||
+					typeof error.message !== "string",
+			))
+	) {
+		throw new Error(
+			`Railway GraphQL request failed (${response.status}): The response did not contain valid GraphQL errors.`,
+		);
+	}
 	if (!response.ok || result.errors?.length || !result.data) {
 		const details = result.errors?.map((error) => error.message).join(", ");
 		throw new Error(

@@ -146,7 +146,8 @@ func (r *Rewriter) rewriteSVCBValues(values []dns.SVCBKeyValue) []dns.SVCBKeyVal
 		case *dns.SVCBIPv4Hint:
 			continue
 		case *dns.SVCBIPv6Hint:
-			for index, address := range hint.Hint {
+			addresses := hint.Hint[:0]
+			for _, address := range hint.Hint {
 				parsed, ok := netip.AddrFromSlice(address)
 				if !ok || !r.realPrefix.Contains(parsed) {
 					continue
@@ -154,8 +155,12 @@ func (r *Rewriter) rewriteSVCBValues(values []dns.SVCBKeyValue) []dns.SVCBKeyVal
 				bytes := parsed.As16()
 				virtual := r.virtualPrefix.Addr().As16()
 				bytes[0], bytes[1] = virtual[0], virtual[1]
-				hint.Hint[index] = net.IP(bytes[:])
+				addresses = append(addresses, net.IP(bytes[:]))
 			}
+			if len(addresses) == 0 {
+				continue
+			}
+			hint.Hint = addresses
 		}
 		result = append(result, value)
 	}

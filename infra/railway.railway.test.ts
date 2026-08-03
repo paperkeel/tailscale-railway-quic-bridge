@@ -132,6 +132,17 @@ describe("requestRailwayGraphql", () => {
 		expect(request.mock.calls[0]?.[1]?.signal).toBeInstanceOf(AbortSignal);
 	});
 
+	it("rejects malformed GraphQL errors", async () => {
+		const request = vi.fn<typeof fetch>().mockResolvedValue(
+			new Response(JSON.stringify({ data: { ok: true }, errors: [{}] }), {
+				status: 200,
+			}),
+		);
+		await expect(
+			requestRailwayGraphql("query TailbridgeTest { test }", {}, "token", request),
+		).rejects.toThrow("did not contain valid GraphQL errors");
+	});
+
 	it("returns false fields for callers to interpret", async () => {
 		const request = vi.fn<typeof fetch>().mockResolvedValue(
 			new Response(JSON.stringify({ data: { serviceInstanceUpdate: false } }), {
