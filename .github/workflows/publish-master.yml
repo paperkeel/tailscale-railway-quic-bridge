@@ -51,11 +51,6 @@ jobs:
           sbom: true
           cache-from: type=gha,scope=master-${{ matrix.component }}
           cache-to: type=gha,mode=max,scope=master-${{ matrix.component }}
-      - name: Make the image public
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PACKAGE: tailscale-railway-quic-bridge-${{ matrix.component }}
-        run: gh api --method PATCH "/orgs/bearfire-dev/packages/container/$PACKAGE" -f visibility=public
       - name: Capture the image digest
         env:
           COMPONENT: ${{ matrix.component }}
