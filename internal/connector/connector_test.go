@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/config"
+	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/dnsproxy"
 	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/protocol"
 	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/status"
 	"github.com/quic-go/quic-go"
@@ -283,6 +284,49 @@ func TestUDPReceiveClassifiesDroppedDatagrams(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("the UDP receiver did not stop")
 	}
+}
+
+func TestUDPReceiveDropsMalformedDNSQueries(t *testing.T) {
+	edge, connector := testConnectorQUICPair(t)
+	resolver := listenUDP(t)
+	dns, err := dnsproxy.New(netip.MustParsePrefix("fd12::/16"), netip.MustParsePrefix("fd20::/16"), "test.railway.internal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := status.New("test")
+	metricsAddress := startStatusServer(t, state)
+	client := testClient(config.Connector{MaxUDPFlows: 1, UDPIdleTimeout: time.Second})
+	client.status = state
+	client.dns = dns
+	client.dnsAddr = resolver.LocalAddr().(*net.UDPAddr).AddrPort()
+	session := &udpSession{
+		client: client, connection: connector,
+		routes: []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")},
+		flows:  make(map[uint64]*udpFlow),
+	}
+	done := make(chan struct{})
+	go func() {
+		session.receive()
+		close(done)
+	}()
+	packet, err := protocol.EncodeUDP(protocol.UDPDatagram{
+		FlowID: 1, Source: netip.MustParseAddrPort("192.0.2.2:1000"),
+		Destination: client.dnsAddr, Payload: []byte("not-dns"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := edge.SendDatagram(packet); err != nil {
+		t.Fatal(err)
+	}
+	waitForMetric(t, metricsAddress, "tailbridge_udp_datagrams_dropped_total", 1)
+	_ = edge.CloseWithError(0, "test complete")
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("the UDP receiver did not stop")
+	}
+	session.close()
 }
 
 func TestUDPSessionCloseClosesAndRejectsFlows(t *testing.T) {
