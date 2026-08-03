@@ -8,8 +8,9 @@ Use the Tailbridge CLI to generate mutual TLS values. Never commit generated env
 
 | Variable | Required | Default | Description |
 |---|---:|---|---|
-| `TB_CONNECTOR_ID` | Yes | None | Stable identity for the Tailbridge edge and Tailbridge connector. |
-| `TB_ENVIRONMENT` | Yes | None | Railway environment name. |
+| `TB_EDGE_ID` | Yes | None | Stable identity for the shared Tailbridge edge. |
+| `TB_CONNECTOR_ID` | Connector only | None | Stable identity for one Railway connector. |
+| `TB_ENVIRONMENT` | Connector only | None | Railway environment name. |
 | `TB_MTLS_CA_B64` | Yes | None | Base64 PEM trust bundle. |
 | `TB_MTLS_CERT_B64` | Yes | None | Base64 PEM leaf certificate. |
 | `TB_MTLS_KEY_B64` | Yes | None | Base64 PEM private key. |
@@ -20,7 +21,7 @@ Use the Tailbridge CLI to generate mutual TLS values. Never commit generated env
 
 | Variable | Required | Default | Description |
 |---|---:|---|---|
-| `TB_ALLOWED_ROUTES` | Yes | None | Comma-separated destination CIDRs. |
+| `TB_CONNECTORS_B64` | Yes | None | Base64 JSON connector registry. SST sets this value. |
 | `TB_QUIC_LISTEN_ADDR` | No | `:4433` | QUIC listen address for Tailbridge connector sessions. |
 | `TB_TCP_LISTEN_ADDR` | No | `[::]:15001` | Transparent TCP listen address. |
 | `TB_UDP_LISTEN_ADDR` | No | `[::]:15002` | Transparent UDP listen address. |
@@ -40,6 +41,9 @@ Use the Tailbridge CLI to generate mutual TLS values. Never commit generated env
 | Variable | Required | Default | Description |
 |---|---:|---|---|
 | `TB_EDGE_ENDPOINT` | Yes | None | Tailbridge edge host and numeric QUIC port. |
+| `TB_VIRTUAL_PREFIX` | Yes | None | Assigned virtual IPv6 `/16` for this connector. |
+| `TB_REAL_PREFIX` | No | `fd12::/16` | Railway private IPv6 `/16` for this connector. |
+| `TB_DNS_SUFFIX` | Yes | None | Project DNS suffix below `railway.internal`. |
 | `TB_ALLOWED_DESTINATIONS` | Yes | None | Railway destination CIDRs. |
 | `TB_MAX_TCP_FLOWS` | No | `4096` | Concurrent TCP flow limit. Use an integer from 1 through 1000000. |
 | `TB_MAX_UDP_FLOWS` | No | `4096` | Concurrent UDP flow limit. Use an integer from 1 through 1000000. |

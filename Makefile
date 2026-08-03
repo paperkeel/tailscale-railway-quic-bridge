@@ -66,9 +66,9 @@ container-smoke:
 	code=0; docker run --rm tailbridge-connector:local || code=$$?; test $$code -eq 2
 
 validate-deploy:
-	docker compose --file deploy/docker-compose.edge.yml config --quiet --no-env-resolution
-	python -c 'import pathlib,tomllib; tomllib.loads(pathlib.Path("deploy/railway.toml").read_text())'
-	docker run --rm --entrypoint sh --volume "$(CURDIR)/deploy/digitalocean:/source:ro" hashicorp/terraform:1.14.5 -c 'cp -a /source /tmp/work && cd /tmp/work && terraform fmt -check && terraform init -backend=false && terraform validate'
+	pnpm install --frozen-lockfile
+	pnpm check:infra
+	pnpm test:infra
 
 audit: check coverage fuzz containers container-smoke validate-deploy
 	git diff --check

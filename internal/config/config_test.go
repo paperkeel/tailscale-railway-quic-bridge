@@ -245,6 +245,7 @@ func setConnectorEnvironment(t *testing.T) {
 	t.Helper()
 	encoded := base64.StdEncoding.EncodeToString([]byte("test"))
 	for name, value := range map[string]string{
+		"TB_EDGE_ID":              "edge-production",
 		"TB_CONNECTOR_ID":         "railway-production",
 		"TB_ENVIRONMENT":          "production",
 		"TB_MTLS_CA_B64":          encoded,
@@ -252,6 +253,9 @@ func setConnectorEnvironment(t *testing.T) {
 		"TB_MTLS_KEY_B64":         encoded,
 		"TB_EDGE_ENDPOINT":        "edge.example.com:4433",
 		"TB_ALLOWED_DESTINATIONS": "fd12::/16",
+		"TB_VIRTUAL_PREFIX":       "fd20::/16",
+		"TB_REAL_PREFIX":          "fd12::/16",
+		"TB_DNS_SUFFIX":           "production.railway.internal",
 	} {
 		t.Setenv(name, value)
 	}
@@ -270,12 +274,12 @@ func setEdgeEnvironment(t *testing.T) {
 	t.Helper()
 	encoded := base64.StdEncoding.EncodeToString([]byte("test"))
 	for name, value := range map[string]string{
-		"TB_CONNECTOR_ID":   "railway-production",
-		"TB_ENVIRONMENT":    "production",
+		"TB_EDGE_ID":        "edge-production",
 		"TB_MTLS_CA_B64":    encoded,
 		"TB_MTLS_CERT_B64":  encoded,
 		"TB_MTLS_KEY_B64":   encoded,
-		"TB_ALLOWED_ROUTES": "fd12::/16",
+		"TB_ALLOWED_ROUTES": "fd20::/11",
+		"TB_CONNECTORS_B64": base64.StdEncoding.EncodeToString([]byte(`[{"connectorId":"railway-production","environment":"production","slot":0,"virtualPrefix":"fd20::/16","realPrefix":"fd12::/16","dnsSuffix":"production.railway.internal"}]`)),
 	} {
 		t.Setenv(name, value)
 	}
@@ -289,5 +293,43 @@ func setEdgeEnvironment(t *testing.T) {
 		"TB_UDP_LISTEN_ADDR",
 	} {
 		t.Setenv(name, "")
+	}
+}
+
+func TestConnectorLoadsDNSConfiguration(t *testing.T) {
+	setConnectorEnvironment(t)
+	configuration, err := LoadConnector()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configuration.EdgeID != "edge-production" || configuration.VirtualPrefix != netip.MustParsePrefix("fd20::/16") || configuration.RealPrefix != netip.MustParsePrefix("fd12::/16") {
+		t.Fatalf("connector identity and prefixes = %+v", configuration)
+	}
+	if configuration.DNSSuffix != "production.railway.internal" {
+		t.Fatalf("DNS suffix = %q", configuration.DNSSuffix)
+	}
+}
+
+func TestEdgeLoadsConnectorRegistry(t *testing.T) {
+	setEdgeEnvironment(t)
+	configuration, err := LoadEdge()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(configuration.Connectors) != 1 {
+		t.Fatalf("connector count = %d, want 1", len(configuration.Connectors))
+	}
+	target := configuration.Connectors[0]
+	if target.ConnectorID != "railway-production" || target.Slot != 0 || target.VirtualPrefix != netip.MustParsePrefix("fd20::/16") || target.RealPrefix != netip.MustParsePrefix("fd12::/16") {
+		t.Fatalf("connector target = %+v", target)
+	}
+}
+
+func TestEdgeRejectsDuplicateConnectorSlots(t *testing.T) {
+	setEdgeEnvironment(t)
+	payload := `[{"connectorId":"one","environment":"production","slot":0,"virtualPrefix":"fd20::/16","realPrefix":"fd12::/16","dnsSuffix":"one.railway.internal"},{"connectorId":"two","environment":"staging","slot":0,"virtualPrefix":"fd20::/16","realPrefix":"fd12::/16","dnsSuffix":"two.railway.internal"}]`
+	t.Setenv("TB_CONNECTORS_B64", base64.StdEncoding.EncodeToString([]byte(payload)))
+	if _, err := LoadEdge(); err == nil {
+		t.Fatal("LoadEdge() accepted duplicate connector slots")
 	}
 }

@@ -1,0 +1,45 @@
+{
+	"name": "@bearfire-dev/tailscale-railway-quic-bridge",
+	"version": "0.0.0-development",
+	"private": false,
+	"type": "module",
+	"main": "./infra/index.ts",
+	"types": "./infra/index.ts",
+	"exports": {
+		".": {
+			"types": "./infra/index.ts",
+			"import": "./infra/index.ts"
+		}
+	},
+	"files": [
+		"infra",
+		"Dockerfile.connector",
+		"Dockerfile.edge"
+	],
+	"packageManager": "pnpm@10.34.5",
+	"engines": {
+		"node": ">=22",
+		"pnpm": "10.34.5"
+	},
+	"scripts": {
+		"build:metadata": "node infra/generate-build.mjs",
+		"check:infra": "sst install && tsc --noEmit",
+		"test:infra": "vitest run",
+		"diff": "sst diff",
+		"deploy": "sst deploy",
+		"remove": "sst remove"
+	},
+	"dependencies": {
+		"@pulumi/command": "1.2.1",
+		"@pulumi/digitalocean": "4.78.0",
+		"@pulumi/pulumi": "3.255.0",
+		"@pulumi/tls": "5.5.1",
+		"@sst-provider/railway": "0.6.1",
+		"sst": "4.17.1"
+	},
+	"devDependencies": {
+		"@types/node": "26.1.2",
+		"typescript": "6.0.3",
+		"vitest": "4.1.10"
+	}
+}

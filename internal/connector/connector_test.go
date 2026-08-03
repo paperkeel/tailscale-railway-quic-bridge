@@ -59,6 +59,31 @@ func TestJitterStaysWithinBounds(t *testing.T) {
 	}
 }
 
+func TestValidateAcceptedChecksConnectorAssignment(t *testing.T) {
+	cfg := config.Connector{
+		Common:        config.Common{ConnectorID: "production"},
+		VirtualPrefix: netip.MustParsePrefix("fd23::/16"),
+		RealPrefix:    netip.MustParsePrefix("fd12::/16"),
+	}
+	client := testClient(cfg)
+	accepted := protocol.ConnectorAccepted{
+		ConnectorID: "production", Slot: 3, VirtualPrefix: "fd23::/16", RealPrefix: "fd12::/16",
+	}
+	if err := client.validateAccepted(accepted); err != nil {
+		t.Fatal(err)
+	}
+	accepted.Slot = 4
+	if err := client.validateAccepted(accepted); err == nil {
+		t.Fatal("validateAccepted() accepted the wrong connector slot")
+	}
+}
+
+func TestDNSAddressUsesTheConfiguredRealPrefix(t *testing.T) {
+	if got := dnsAddress(netip.MustParsePrefix("fd99::/16")); got != netip.MustParseAddrPort("[fd99::10]:53") {
+		t.Fatalf("DNS address = %v", got)
+	}
+}
+
 func TestUDPFlowsAreScopedToTheirSession(t *testing.T) {
 	destination := listenUDP(t)
 	packet := testDatagram(destination.LocalAddr().(*net.UDPAddr).AddrPort())

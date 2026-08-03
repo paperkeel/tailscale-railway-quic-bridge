@@ -6,6 +6,34 @@ Tailbridge removes DERP from the default network path to Railway private service
 
 The client connects directly to the Tailbridge edge. The Tailbridge edge forwards each flow through the outbound Tailbridge connector.
 
+## Deployment control plane
+
+SST manages the DigitalOcean edge and Railway connector as one stage. The control plane does not process application traffic.
+
+Cloudflare R2 stores the encrypted SST state. Local state is available only for disposable development stages.
+
+SST uses these resource dependencies:
+
+1. SST creates the mutual TLS certificates and the edge SSH key.
+
+2. SST creates the DigitalOcean SSH key, volume, droplet, firewall, and volume attachment.
+
+3. SST can create or select the Railway project and environment at the same time.
+
+4. SST mounts the volume and deploys the edge through SSH.
+
+5. SST creates the connector service and variables after their resource IDs become available.
+
+6. SST applies the connector settings after the edge and variables become ready.
+
+The connector settings start the Railway deployment.
+
+The connector needs the edge public IPv4 address during deployment.
+
+SST transfers edge configuration through SSH. It transfers connector configuration through Railway variables.
+
+The connector opens QUIC to the edge public IPv4 address on UDP port `4433`. Public DNS is not in this path.
+
 ## Components
 
 The Tailbridge edge runs Tailscale in kernel mode. It also runs the QUIC server and the transparent proxy.
@@ -28,7 +56,7 @@ The Tailbridge edge receives redirected UDP datagrams. Linux supplies the origin
 
 The Tailbridge edge assigns a flow identifier. It sends each application datagram through a QUIC datagram.
 
-The Tailbridge connector keeps one UDP socket for each flow in the active QUIC session. It closes these sockets when the session ends.
+The Tailbridge connector keeps one UDP socket for each flow. It closes these sockets when the active QUIC session ends.
 
 Traffic in either direction refreshes the idle timeout. Idle mappings expire after the configured timeout.
 
@@ -44,7 +72,7 @@ The Tailbridge edge and Tailbridge connector forward DNS like other UDP or TCP t
 
 When a newer connector session becomes ready, the Tailbridge edge marks the previous session as draining.
 
-The active session and the draining session overlap for up to 15 seconds. The Tailbridge edge then closes the draining session.
+The active session and the draining session overlap for up to 15 seconds. The edge then closes the draining session.
 
 Each connector session accepts the intersection of the edge routes and connector destinations.
 
@@ -52,13 +80,13 @@ The Tailbridge edge and Tailbridge connector enforce the accepted routes for tha
 
 New flows use the active session. Existing TCP flows remain on the draining session during the drain interval.
 
-Existing UDP flows stay bound to the draining session. The edge accepts responses only from the session that created each flow.
+Existing UDP flows stay bound to the draining session. The edge accepts responses only from their original session.
 
 The Tailbridge edge closes these UDP flows when the draining session ends.
 
 The handshake includes the Tailbridge connector process start time.
 
-The Tailbridge edge rejects an older process while a newer process is active. This rule prevents an old replica from reclaiming the session.
+The Tailbridge edge rejects an older process while a newer process is active. This rule stops an old replica from reclaiming the session.
 
 The Tailbridge connector has no Tailscale identity. Railway replacement cannot create a duplicate Tailscale device.
 

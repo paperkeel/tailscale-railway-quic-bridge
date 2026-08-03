@@ -9,9 +9,9 @@ import (
 )
 
 const (
-	ALPN            = "tailbridge/1"
+	ALPN            = "tailbridge/2"
 	MaxControlFrame = 64 * 1024
-	ProtocolVersion = "1.0"
+	ProtocolVersion = "2.0"
 )
 
 type ConnectorHello struct {
@@ -24,9 +24,13 @@ type ConnectorHello struct {
 }
 
 type ConnectorAccepted struct {
-	SessionID   string   `json:"session_id"`
-	Routes      []string `json:"accepted_routes"`
-	MaxTCPFlows int64    `json:"max_tcp_flows"`
+	SessionID     string   `json:"session_id"`
+	ConnectorID   string   `json:"connector_id"`
+	Slot          int      `json:"slot"`
+	VirtualPrefix string   `json:"virtual_prefix"`
+	RealPrefix    string   `json:"real_prefix"`
+	Routes        []string `json:"accepted_routes"`
+	MaxTCPFlows   int64    `json:"max_tcp_flows"`
 }
 
 type OpenTCP struct {

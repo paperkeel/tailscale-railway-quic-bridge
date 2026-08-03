@@ -5,6 +5,8 @@ bin/
 coverage.out
 .coverage/
 dist/
+node_modules/
+.sst/
 *.pem
 *.key
 tailscale-policy.hujson

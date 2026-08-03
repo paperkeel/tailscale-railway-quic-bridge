@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/config"
 	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/protocol"
@@ -21,7 +22,7 @@ func ServerTLS(c config.Common) (*tls.Config, error) {
 		ClientAuth:       tls.RequireAndVerifyClientCert,
 		ClientCAs:        roots,
 		NextProtos:       []string{protocol.ALPN},
-		VerifyConnection: verifyIdentity(roots, "connector", c.ConnectorID, x509.ExtKeyUsageClientAuth),
+		VerifyConnection: verifyRoleIdentity(roots, "connector", x509.ExtKeyUsageClientAuth),
 	}, nil
 }
 
@@ -30,36 +31,82 @@ func ClientTLS(c config.Common) (*tls.Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	edgeID := c.EdgeID
+	if edgeID == "" {
+		edgeID = c.ConnectorID
+	}
 	return &tls.Config{
 		MinVersion:         tls.VersionTLS13,
 		Certificates:       []tls.Certificate{certificate},
 		RootCAs:            roots,
 		NextProtos:         []string{protocol.ALPN},
 		InsecureSkipVerify: true,
-		VerifyConnection:   verifyIdentity(roots, "edge", c.ConnectorID, x509.ExtKeyUsageServerAuth),
+		VerifyConnection:   verifyIdentity(roots, "edge", edgeID, x509.ExtKeyUsageServerAuth),
 	}, nil
 }
 
-func verifyIdentity(roots *x509.CertPool, role, id string, usage x509.ExtKeyUsage) func(tls.ConnectionState) error {
-	want := "spiffe://tailbridge.local/" + role + "/" + id
+func verifyRoleIdentity(roots *x509.CertPool, role string, usage x509.ExtKeyUsage) func(tls.ConnectionState) error {
 	return func(state tls.ConnectionState) error {
-		if len(state.PeerCertificates) == 0 {
-			return errors.New("peer certificate is missing")
-		}
-		intermediates := x509.NewCertPool()
-		for _, certificate := range state.PeerCertificates[1:] {
-			intermediates.AddCert(certificate)
-		}
-		if _, err := state.PeerCertificates[0].Verify(x509.VerifyOptions{Roots: roots, Intermediates: intermediates, KeyUsages: []x509.ExtKeyUsage{usage}}); err != nil {
+		if err := verifyPeerCertificate(state, roots, usage); err != nil {
 			return err
 		}
-		for _, identity := range state.PeerCertificates[0].URIs {
-			if identity.String() == want {
-				return nil
-			}
-		}
-		return fmt.Errorf("peer identity does not match %s", want)
+		_, err := PeerIdentity(state, role)
+		return err
 	}
+}
+
+func verifyIdentity(roots *x509.CertPool, role, id string, usage x509.ExtKeyUsage) func(tls.ConnectionState) error {
+	return func(state tls.ConnectionState) error {
+		if err := verifyPeerCertificate(state, roots, usage); err != nil {
+			return err
+		}
+		identity, err := PeerIdentity(state, role)
+		if err != nil {
+			return err
+		}
+		if identity != id {
+			return fmt.Errorf("peer identity does not match spiffe://tailbridge.local/%s/%s", role, id)
+		}
+		return nil
+	}
+}
+
+func verifyPeerCertificate(state tls.ConnectionState, roots *x509.CertPool, usage x509.ExtKeyUsage) error {
+	if len(state.PeerCertificates) == 0 {
+		return errors.New("peer certificate is missing")
+	}
+	intermediates := x509.NewCertPool()
+	for _, certificate := range state.PeerCertificates[1:] {
+		intermediates.AddCert(certificate)
+	}
+	_, err := state.PeerCertificates[0].Verify(x509.VerifyOptions{Roots: roots, Intermediates: intermediates, KeyUsages: []x509.ExtKeyUsage{usage}})
+	return err
+}
+
+func PeerIdentity(state tls.ConnectionState, role string) (string, error) {
+	if len(state.PeerCertificates) == 0 {
+		return "", errors.New("peer certificate is missing")
+	}
+	prefix := "spiffe://tailbridge.local/" + role + "/"
+	var identity string
+	for _, candidate := range state.PeerCertificates[0].URIs {
+		value := candidate.String()
+		if !strings.HasPrefix(value, prefix) {
+			continue
+		}
+		id := strings.TrimPrefix(value, prefix)
+		if id == "" || strings.Contains(id, "/") || candidate.RawQuery != "" || candidate.Fragment != "" {
+			return "", fmt.Errorf("peer %s identity is not valid", role)
+		}
+		if identity != "" {
+			return "", fmt.Errorf("peer has more than one %s identity", role)
+		}
+		identity = id
+	}
+	if identity == "" {
+		return "", fmt.Errorf("peer certificate has no %s identity", role)
+	}
+	return identity, nil
 }
 
 func credentials(c config.Common) (tls.Certificate, *x509.CertPool, error) {

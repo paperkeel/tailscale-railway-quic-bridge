@@ -25,10 +25,10 @@ func TestFrameRoundTrip(t *testing.T) {
 }
 
 func TestProtocolConstantsRemainStable(t *testing.T) {
-	if ALPN != "tailbridge/1" {
+	if ALPN != "tailbridge/2" {
 		t.Fatalf("got ALPN %q", ALPN)
 	}
-	if ProtocolVersion != "1.0" {
+	if ProtocolVersion != "2.0" {
 		t.Fatalf("got protocol version %q", ProtocolVersion)
 	}
 }
@@ -47,7 +47,7 @@ func TestProtocolJSONFieldsRemainStable(t *testing.T) {
 		{
 			name:  "connector accepted",
 			value: ConnectorAccepted{},
-			keys:  []string{"accepted_routes", "max_tcp_flows", "session_id"},
+			keys:  []string{"accepted_routes", "connector_id", "max_tcp_flows", "real_prefix", "session_id", "slot", "virtual_prefix"},
 		},
 		{
 			name:  "open TCP",

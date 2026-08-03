@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/config"
+	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/dnsproxy"
 	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/protocol"
 	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/proxy"
 	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/status"
@@ -28,12 +29,15 @@ type Client struct {
 	status  *status.Server
 	version string
 	started int64
+	dns     *dnsproxy.Rewriter
+	dnsAddr netip.AddrPort
 }
 
 type udpFlow struct {
 	connection  *net.UDPConn
 	source      netip.AddrPort
 	destination netip.AddrPort
+	dns         bool
 }
 
 type udpSession struct {
@@ -48,7 +52,17 @@ type udpSession struct {
 const maxUDPPayload = 8 * 1024
 
 func New(cfg config.Connector, logger *slog.Logger, state *status.Server, version string) *Client {
-	return &Client{config: cfg, logger: logger, status: state, version: version, started: time.Now().UnixNano()}
+	dns, _ := dnsproxy.New(cfg.RealPrefix, cfg.VirtualPrefix, cfg.DNSSuffix)
+	return &Client{config: cfg, logger: logger, status: state, version: version, started: time.Now().UnixNano(), dns: dns, dnsAddr: dnsAddress(cfg.RealPrefix)}
+}
+
+func dnsAddress(prefix netip.Prefix) netip.AddrPort {
+	if !prefix.Addr().Is6() || prefix.Bits() != 16 {
+		return netip.AddrPort{}
+	}
+	bytes := prefix.Addr().As16()
+	bytes[15] = 0x10
+	return netip.AddrPortFrom(netip.AddrFrom16(bytes), 53)
 }
 
 func (c *Client) Run(ctx context.Context) error {
@@ -110,6 +124,9 @@ func (c *Client) serve(ctx context.Context, conn *quic.Conn) error {
 	if accepted.SessionID == "" || accepted.MaxTCPFlows < 1 {
 		return errors.New("the edge returned an invalid session response")
 	}
+	if err := c.validateAccepted(accepted); err != nil {
+		return err
+	}
 	acceptedRoutes, err := config.ValidateAcceptedRoutes(accepted.Routes, c.config.AllowedDestinations)
 	if err != nil {
 		return fmt.Errorf("validate accepted routes: %w", err)
@@ -127,6 +144,18 @@ func (c *Client) serve(ctx context.Context, conn *quic.Conn) error {
 		}
 		go c.handleTCP(stream, accepted.SessionID, acceptedRoutes)
 	}
+}
+
+func (c *Client) validateAccepted(accepted protocol.ConnectorAccepted) error {
+	virtualPrefix, virtualErr := netip.ParsePrefix(accepted.VirtualPrefix)
+	realPrefix, realErr := netip.ParsePrefix(accepted.RealPrefix)
+	virtualBytes := c.config.VirtualPrefix.Addr().As16()
+	wantSlot := int(virtualBytes[1] - 0x20)
+	if accepted.ConnectorID != c.config.ConnectorID || virtualErr != nil || realErr != nil ||
+		virtualPrefix != c.config.VirtualPrefix || realPrefix != c.config.RealPrefix || accepted.Slot != wantSlot {
+		return errors.New("the edge returned connector identity or prefix values that do not match the connector configuration")
+	}
+	return nil
 }
 
 func (s *udpSession) receive() {
@@ -150,8 +179,16 @@ func (s *udpSession) receive() {
 			s.client.status.DatagramDropped()
 			continue
 		}
+		payload := packet.Payload
+		if flow.dns {
+			payload, err = s.client.dns.Query(payload)
+			if err != nil {
+				s.client.status.DatagramDropped()
+				continue
+			}
+		}
 		_ = flow.connection.SetReadDeadline(time.Now().Add(s.client.config.UDPIdleTimeout))
-		if _, err := flow.connection.Write(packet.Payload); err != nil {
+		if _, err := flow.connection.Write(payload); err != nil {
 			s.client.status.DatagramDropped()
 		}
 	}
@@ -177,7 +214,7 @@ func (s *udpSession) flow(packet protocol.UDPDatagram) (*udpFlow, error) {
 	if err != nil {
 		return nil, err
 	}
-	flow := &udpFlow{connection: connection, source: packet.Source, destination: packet.Destination}
+	flow := &udpFlow{connection: connection, source: packet.Source, destination: packet.Destination, dns: s.client.dns != nil && packet.Destination == s.client.dnsAddr}
 	s.flows[packet.FlowID] = flow
 	s.client.status.UDPFlowStarted()
 	go s.readResponses(packet.FlowID, flow)
@@ -201,7 +238,15 @@ func (s *udpSession) readResponses(flowID uint64, flow *udpFlow) {
 		if err != nil {
 			return
 		}
-		packet, err := protocol.EncodeUDP(protocol.UDPDatagram{FlowID: flowID, Response: true, Source: flow.destination, Destination: flow.source, Payload: buffer[:n]})
+		payload := buffer[:n]
+		if flow.dns {
+			payload, err = s.client.dns.Response(payload)
+			if err != nil {
+				s.client.status.DatagramDropped()
+				continue
+			}
+		}
+		packet, err := protocol.EncodeUDP(protocol.UDPDatagram{FlowID: flowID, Response: true, Source: flow.destination, Destination: flow.source, Payload: payload})
 		if err != nil {
 			s.client.status.DatagramDropped()
 			return
@@ -296,7 +341,11 @@ func (c *Client) handleTCP(stream *quic.Stream, sessionID string, routes []netip
 	_ = stream.SetDeadline(time.Time{})
 	c.status.FlowStarted()
 	var copyErr error
-	sent, received, copyErr = proxy.Bidirectional(stream, upstream)
+	if c.dns != nil && destination == c.dnsAddr {
+		sent, received, copyErr = c.dns.ForwardTCP(stream, upstream)
+	} else {
+		sent, received, copyErr = proxy.Bidirectional(stream, upstream)
+	}
 	span.SetAttributes(attribute.Int64("network.io.sent", sent), attribute.Int64("network.io.received", received))
 	c.status.FlowEnded()
 	if copyErr == nil {

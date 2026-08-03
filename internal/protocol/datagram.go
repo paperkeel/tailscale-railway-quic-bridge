@@ -6,7 +6,7 @@ import (
 	"net/netip"
 )
 
-const datagramVersion byte = 1
+const datagramVersion byte = 2
 
 type UDPDatagram struct {
 	FlowID      uint64

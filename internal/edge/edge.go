@@ -33,11 +33,13 @@ import (
 )
 
 type Server struct {
-	config      config.Edge
-	logger      *slog.Logger
-	status      *status.Server
+	config   config.Edge
+	logger   *slog.Logger
+	status   *status.Server
+	registry map[string]*connectorEntry
+	routes   []*connectorEntry
+	// session keeps the single-connector test and API surface compatible.
 	session     atomic.Pointer[session]
-	sessionMu   sync.Mutex
 	connections sync.Map
 	flowID      atomic.Uint64
 	limit       chan struct{}
@@ -46,22 +48,34 @@ type Server struct {
 	udpByID     map[uint64]*edgeUDPFlow
 }
 
+type connectorEntry struct {
+	target   config.ConnectorTarget
+	mu       sync.Mutex
+	active   atomic.Pointer[session]
+	draining *session
+}
+
 type edgeUDPFlow struct {
 	id          uint64
 	key         string
 	session     *session
 	source      *net.UDPAddr
 	destination netip.AddrPort
+	translated  netip.AddrPort
 	reply       *net.UDPConn
 	lastUsed    time.Time
 }
 
 type session struct {
-	id         string
-	started    int64
-	connection *quic.Conn
-	draining   atomic.Bool
-	routes     []netip.Prefix
+	id            string
+	connectorID   string
+	slot          int
+	started       int64
+	connection    *quic.Conn
+	draining      atomic.Bool
+	routes        []netip.Prefix
+	virtualPrefix netip.Prefix
+	realPrefix    netip.Prefix
 }
 
 type networkPolicy interface {
@@ -97,10 +111,21 @@ var (
 )
 
 func New(cfg config.Edge, logger *slog.Logger, state *status.Server) *Server {
-	return &Server{config: cfg, logger: logger, status: state, limit: make(chan struct{}, cfg.MaxTCPFlows), udpByKey: make(map[string]*edgeUDPFlow), udpByID: make(map[uint64]*edgeUDPFlow)}
+	server := &Server{config: cfg, logger: logger, status: state, registry: make(map[string]*connectorEntry), limit: make(chan struct{}, cfg.MaxTCPFlows), udpByKey: make(map[string]*edgeUDPFlow), udpByID: make(map[uint64]*edgeUDPFlow)}
+	configured := make([]status.Connector, 0, len(cfg.Connectors))
+	for _, target := range cfg.Connectors {
+		entry := &connectorEntry{target: target}
+		server.registry[target.ConnectorID] = entry
+		server.routes = append(server.routes, entry)
+		configured = append(configured, status.Connector{ConnectorID: target.ConnectorID, Slot: target.Slot, VirtualPrefix: target.VirtualPrefix.String(), RealPrefix: target.RealPrefix.String()})
+	}
+	state.ConfigureConnectors(configured)
+	return server
 }
 
 func (s *Server) Run(ctx context.Context) error {
+	s.status.SetHealthy(false)
+	defer s.status.SetHealthy(false)
 	runContext, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
 	var bootDone <-chan error
@@ -127,7 +152,14 @@ func (s *Server) Run(ctx context.Context) error {
 	case err := <-bootDone:
 		return processStoppedError("Tailscale stopped before it became ready", err)
 	}
-	policy, err := createPolicy(s.config.AllowedRoutes, s.config.TCPListenAddr, s.config.UDPListenAddr)
+	policyRoutes := s.config.AllowedRoutes
+	if len(s.routes) > 0 {
+		policyRoutes = make([]netip.Prefix, 0, len(s.routes))
+		for _, entry := range s.routes {
+			policyRoutes = append(policyRoutes, entry.target.VirtualPrefix)
+		}
+	}
+	policy, err := createPolicy(policyRoutes, s.config.TCPListenAddr, s.config.UDPListenAddr)
 	if err != nil {
 		return err
 	}
@@ -159,6 +191,7 @@ func (s *Server) Run(ctx context.Context) error {
 		return fmt.Errorf("listen for transparent UDP: %w", err)
 	}
 	defer udpListener.Close()
+	s.status.SetHealthy(true)
 
 	group, groupContext := errgroup.WithContext(runContext)
 	group.Go(func() error { return s.acceptConnectors(groupContext, listener) })
@@ -185,8 +218,15 @@ func (s *Server) Run(ctx context.Context) error {
 		_ = listener.Close()
 		_ = tcpListener.Close()
 		_ = udpListener.Close()
-		if active := s.session.Load(); active != nil {
-			_ = active.connection.CloseWithError(0, "edge shutting down")
+		for _, entry := range s.routes {
+			if active := entry.active.Load(); active != nil {
+				_ = active.connection.CloseWithError(0, "edge shutting down")
+			}
+			entry.mu.Lock()
+			if draining := entry.draining; draining != nil {
+				_ = draining.connection.CloseWithError(0, "edge shutting down")
+			}
+			entry.mu.Unlock()
 		}
 		s.connections.Range(func(key, _ any) bool {
 			_ = key.(*quic.Conn).CloseWithError(0, "edge shutting down")
@@ -234,7 +274,17 @@ func (s *Server) authenticate(ctx context.Context, conn *quic.Conn) {
 		_ = conn.CloseWithError(2, "The hello frame is not valid.")
 		return
 	}
-	if hello.ProtocolVersion != protocol.ProtocolVersion || hello.ConnectorID != s.config.ConnectorID || hello.Environment != s.config.Environment {
+	entry := s.registry[hello.ConnectorID]
+	if entry == nil && len(s.registry) == 0 && hello.ConnectorID == s.config.ConnectorID {
+		realPrefix := firstIPv6Prefix(s.config.AllowedRoutes)
+		entry = &connectorEntry{target: config.ConnectorTarget{ConnectorID: s.config.ConnectorID, Environment: s.config.Environment, VirtualPrefix: realPrefix, RealPrefix: realPrefix}}
+	}
+	certificateID, identityErr := connectorIdentity(conn)
+	if identityErr != nil && len(s.config.CABundle) == 0 {
+		certificateID = hello.ConnectorID
+		identityErr = nil
+	}
+	if hello.ProtocolVersion != protocol.ProtocolVersion || entry == nil || identityErr != nil || hello.ConnectorID != certificateID || hello.Environment != entry.target.Environment {
 		s.status.Denied()
 		_ = conn.CloseWithError(3, "The edge rejected the connector identity.")
 		return
@@ -254,7 +304,11 @@ func (s *Server) authenticate(ctx context.Context, conn *quic.Conn) {
 		}
 		advertised = append(advertised, route.Masked())
 	}
-	acceptedRoutes := config.IntersectPrefixes(s.config.AllowedRoutes, advertised)
+	realRoutes := []netip.Prefix{entry.target.RealPrefix}
+	if len(s.registry) == 0 {
+		realRoutes = s.config.AllowedRoutes
+	}
+	acceptedRoutes := config.IntersectPrefixes(realRoutes, advertised)
 	if len(acceptedRoutes) == 0 {
 		s.status.Denied()
 		_ = conn.CloseWithError(3, "The edge and connector have no shared routes.")
@@ -269,29 +323,45 @@ func (s *Server) authenticate(ctx context.Context, conn *quic.Conn) {
 	for _, route := range acceptedRoutes {
 		routes = append(routes, route.String())
 	}
-	next := &session{id: id, started: hello.StartedUnixNano, connection: conn, routes: acceptedRoutes}
-	s.sessionMu.Lock()
-	previous := s.session.Load()
+	next := &session{id: id, connectorID: entry.target.ConnectorID, slot: entry.target.Slot, started: hello.StartedUnixNano, connection: conn, routes: acceptedRoutes, virtualPrefix: entry.target.VirtualPrefix, realPrefix: entry.target.RealPrefix}
+	entry.mu.Lock()
+	previous := entry.active.Load()
+	if previous == nil && len(s.registry) == 0 {
+		previous = s.session.Load()
+	}
 	if previous != nil && !connectionClosed(previous.connection) && next.started <= previous.started {
-		s.sessionMu.Unlock()
+		entry.mu.Unlock()
 		_ = conn.CloseWithError(5, "newer connector session is active")
-		s.logger.Info("connector session superseded", "event.name", "connector.session", "connector.id", hello.ConnectorID, "version", hello.SoftwareVersion)
+		s.logger.Info("connector session superseded", "event.name", "connector.session", "connector_id", hello.ConnectorID, "slot", entry.target.Slot, "version", hello.SoftwareVersion)
 		return
 	}
-	if err := protocol.WriteFrame(control, protocol.ConnectorAccepted{SessionID: id, Routes: routes, MaxTCPFlows: s.config.MaxTCPFlows}); err != nil {
-		s.sessionMu.Unlock()
+	if err := protocol.WriteFrame(control, protocol.ConnectorAccepted{SessionID: id, ConnectorID: hello.ConnectorID, Slot: entry.target.Slot, VirtualPrefix: entry.target.VirtualPrefix.String(), RealPrefix: entry.target.RealPrefix.String(), Routes: routes, MaxTCPFlows: s.config.MaxTCPFlows}); err != nil {
+		entry.mu.Unlock()
 		_ = conn.CloseWithError(4, "The edge could not send the hello response.")
 		return
 	}
 	_ = control.SetDeadline(time.Time{})
-	s.session.Store(next)
-	s.sessionMu.Unlock()
-	s.status.SetReady(true)
-	go s.status.ObserveQUIC(conn.Context().Done(), conn)
-	s.logger.Info("connector session ready", "event.name", "connector.session", "session_id", id, "connector.id", hello.ConnectorID, "version", hello.SoftwareVersion)
-	go s.receiveUDP(next)
+	entry.active.Store(next)
+	staleDraining := entry.draining
 	if previous != nil {
 		previous.draining.Store(true)
+		entry.draining = previous
+	}
+	if len(s.registry) == 0 || len(s.registry) == 1 {
+		s.session.Store(next)
+	}
+	entry.mu.Unlock()
+	if staleDraining != nil && staleDraining != previous {
+		_ = staleDraining.connection.CloseWithError(0, "A newer draining session replaced this session.")
+	}
+	s.status.ConnectorReady(hello.ConnectorID, id)
+	if len(s.registry) == 0 {
+		s.status.SetReady(true)
+	}
+	go s.status.ObserveQUIC(conn.Context().Done(), conn)
+	s.logger.Info("connector session ready", "event.name", "connector.session", "session_id", id, "connector_id", hello.ConnectorID, "slot", entry.target.Slot, "version", hello.SoftwareVersion)
+	go s.receiveUDP(next)
+	if previous != nil {
 		go func() {
 			timer := time.NewTimer(15 * time.Second)
 			defer timer.Stop()
@@ -300,13 +370,35 @@ func (s *Server) authenticate(ctx context.Context, conn *quic.Conn) {
 			case <-timer.C:
 				_ = previous.connection.CloseWithError(0, "The deployment drain is complete.")
 			}
+			entry.mu.Lock()
+			if entry.draining == previous {
+				entry.draining = nil
+			}
+			entry.mu.Unlock()
 		}()
 	}
 	<-conn.Context().Done()
-	if s.session.CompareAndSwap(next, nil) {
-		s.status.SetReady(false)
+	if entry.active.CompareAndSwap(next, nil) {
+		s.session.CompareAndSwap(next, nil)
+		s.status.ConnectorClosed(hello.ConnectorID, id)
+		if len(s.registry) == 0 {
+			s.status.SetReady(false)
+		}
 	}
-	s.logger.Info("connector session closed", "event.name", "connector.session", "session_id", id, "outcome", "closed")
+	s.logger.Info("connector session closed", "event.name", "connector.session", "session_id", id, "connector_id", hello.ConnectorID, "slot", entry.target.Slot, "outcome", "closed")
+}
+
+func connectorIdentity(conn *quic.Conn) (string, error) {
+	return transport.PeerIdentity(conn.ConnectionState().TLS, "connector")
+}
+
+func firstIPv6Prefix(prefixes []netip.Prefix) netip.Prefix {
+	for _, prefix := range prefixes {
+		if prefix.Addr().Is6() {
+			return prefix.Masked()
+		}
+	}
+	return netip.Prefix{}
 }
 
 func (s *Server) acceptUDP(ctx context.Context, listener *net.UDPConn) error {
@@ -324,24 +416,25 @@ func (s *Server) acceptUDP(ctx context.Context, listener *net.UDPConn) error {
 			return fmt.Errorf("receive UDP: %w", err)
 		}
 		destination, err := originalUDPDestination(oob[:oobn])
-		if err != nil || !config.Allowed(s.config.AllowedRoutes, destination.Addr().Unmap()) {
+		if err != nil {
 			s.status.Denied()
 			s.status.DatagramDropped()
 			continue
 		}
-		active := s.session.Load()
-		if active == nil || active.draining.Load() || !config.Allowed(active.routes, destination.Addr().Unmap()) {
+		active, translated, ok := s.route(destination)
+		if !ok {
+			s.status.Denied()
 			s.status.DatagramDropped()
 			continue
 		}
 		sourceAddr := source.AddrPort()
 		key := active.id + "|" + sourceAddr.String() + "|" + destination.String()
-		flow, err := s.edgeUDPFlow(active, key, source, destination)
+		flow, err := s.edgeUDPFlowTranslated(active, key, source, destination, translated)
 		if err != nil {
 			s.status.DatagramDropped()
 			continue
 		}
-		packet, err := protocol.EncodeUDP(protocol.UDPDatagram{FlowID: flow.id, Source: sourceAddr, Destination: destination, Payload: buffer[:n]})
+		packet, err := protocol.EncodeUDP(protocol.UDPDatagram{FlowID: flow.id, Source: sourceAddr, Destination: translated, Payload: buffer[:n]})
 		if err == nil {
 			if err := active.connection.SendDatagram(packet); err != nil {
 				s.status.DatagramDropped()
@@ -353,6 +446,10 @@ func (s *Server) acceptUDP(ctx context.Context, listener *net.UDPConn) error {
 }
 
 func (s *Server) edgeUDPFlow(active *session, key string, source *net.UDPAddr, destination netip.AddrPort) (*edgeUDPFlow, error) {
+	return s.edgeUDPFlowTranslated(active, key, source, destination, destination)
+}
+
+func (s *Server) edgeUDPFlowTranslated(active *session, key string, source *net.UDPAddr, destination, translated netip.AddrPort) (*edgeUDPFlow, error) {
 	s.udpMu.Lock()
 	defer s.udpMu.Unlock()
 	if flow := s.udpByKey[key]; flow != nil {
@@ -366,7 +463,7 @@ func (s *Server) edgeUDPFlow(active *session, key string, source *net.UDPAddr, d
 	if err != nil {
 		return nil, err
 	}
-	flow := &edgeUDPFlow{id: s.flowID.Add(1), key: key, session: active, source: source, destination: destination, reply: reply, lastUsed: time.Now()}
+	flow := &edgeUDPFlow{id: s.flowID.Add(1), key: key, session: active, source: source, destination: destination, translated: translated, reply: reply, lastUsed: time.Now()}
 	s.udpByKey[key] = flow
 	s.udpByID[flow.id] = flow
 	s.status.UDPFlowStarted()
@@ -407,7 +504,14 @@ func (s *Server) receiveUDP(active *session) {
 		}
 		s.udpMu.Lock()
 		flow := s.udpByID[packet.FlowID]
-		if flow != nil && flow.session == active && packet.Source == flow.destination && packet.Destination == flow.source.AddrPort() {
+		wantSource := netip.AddrPort{}
+		if flow != nil {
+			wantSource = flow.translated
+			if !wantSource.IsValid() {
+				wantSource = flow.destination
+			}
+		}
+		if flow != nil && flow.session == active && packet.Source == wantSource && packet.Destination == flow.source.AddrPort() {
 			flow.lastUsed = time.Now()
 		} else {
 			flow = nil
@@ -434,6 +538,28 @@ func (s *Server) closeUDPSession(active *session) {
 		_ = flow.reply.Close()
 		s.status.UDPFlowEnded()
 	}
+}
+
+func (s *Server) route(destination netip.AddrPort) (*session, netip.AddrPort, bool) {
+	for _, entry := range s.routes {
+		if !entry.target.VirtualPrefix.Contains(destination.Addr().Unmap()) {
+			continue
+		}
+		active := entry.active.Load()
+		if active == nil || active.draining.Load() {
+			return nil, netip.AddrPort{}, false
+		}
+		translated, err := translateAddrPort(destination, entry.target.VirtualPrefix, entry.target.RealPrefix)
+		if err != nil || !config.Allowed(active.routes, translated.Addr()) {
+			return nil, netip.AddrPort{}, false
+		}
+		return active, translated, true
+	}
+	active := s.session.Load()
+	if active == nil || active.draining.Load() || !config.Allowed(active.routes, destination.Addr().Unmap()) {
+		return nil, netip.AddrPort{}, false
+	}
+	return active, destination, true
 }
 
 func (s *Server) acceptTCP(ctx context.Context, listener net.Listener) error {
@@ -465,27 +591,40 @@ func (s *Server) handleTCP(ctx context.Context, client net.Conn) {
 	outcome := "failed"
 	errorCode := "INTERNAL_ERROR"
 	sessionID := ""
+	connectorID := ""
+	slot := -1
+	translatedDestination := ""
 	var sent, received int64
 	defer func() {
-		s.logger.Info("The TCP flow completed.", "event.name", "tcp.flow", "flow_id", flowID, "session_id", sessionID, "destination", destination, "bytes.sent", sent, "bytes.received", received, "duration_ms", time.Since(started).Milliseconds(), "outcome", outcome, "error.code", errorCode)
+		s.logger.Info("The TCP flow completed.", "event.name", "tcp.flow", "flow_id", flowID, "connector_id", connectorID, "slot", slot, "session_id", sessionID, "virtual_destination", destination, "translated_destination", translatedDestination, "bytes_sent", sent, "bytes_received", received, "duration_ms", time.Since(started).Milliseconds(), "outcome", outcome, "error_code", errorCode)
 	}()
 	ctx, span := otel.Tracer("tailbridge/edge").Start(ctx, "tcp.flow")
 	defer span.End()
 	span.SetAttributes(attribute.String("network.peer.address", source), attribute.String("server.address", destination))
 	addressPort, err := netip.ParseAddrPort(destination)
-	if err != nil || !config.Allowed(s.config.AllowedRoutes, addressPort.Addr().Unmap()) {
+	if err != nil {
 		errorCode = "DESTINATION_DENIED"
 		s.status.Denied()
 		_ = client.Close()
 		return
 	}
-	active := s.session.Load()
-	if active == nil || active.draining.Load() || !config.Allowed(active.routes, addressPort.Addr().Unmap()) {
+	active, translated, ok := s.route(addressPort)
+	if !ok {
 		errorCode = "SESSION_UNAVAILABLE"
 		_ = client.Close()
 		return
 	}
 	sessionID = active.id
+	connectorID = active.connectorID
+	slot = active.slot
+	translatedDestination = translated.String()
+	span.SetAttributes(
+		attribute.String("tailbridge.connector.id", connectorID),
+		attribute.Int("tailbridge.connector.slot", slot),
+		attribute.String("tailbridge.session.id", sessionID),
+		attribute.String("tailbridge.destination.virtual", destination),
+		attribute.String("tailbridge.destination.translated", translatedDestination),
+	)
 	openContext, cancelOpen := context.WithTimeout(ctx, 10*time.Second)
 	defer cancelOpen()
 	stream, err := active.connection.OpenStreamSync(openContext)
@@ -498,7 +637,7 @@ func (s *Server) handleTCP(ctx context.Context, client net.Conn) {
 	_ = stream.SetDeadline(deadline)
 	carrier := propagation.MapCarrier{}
 	otel.GetTextMapPropagator().Inject(ctx, carrier)
-	request := protocol.OpenTCP{FlowID: flowID, Source: source, Destination: destination, DeadlineUnixMS: deadline.UnixMilli(), TraceParent: carrier.Get("traceparent"), TraceState: carrier.Get("tracestate")}
+	request := protocol.OpenTCP{FlowID: flowID, Source: source, Destination: translated.String(), DeadlineUnixMS: deadline.UnixMilli(), TraceParent: carrier.Get("traceparent"), TraceState: carrier.Get("tracestate")}
 	if err := protocol.WriteFrame(stream, request); err != nil {
 		errorCode = "CONTROL_WRITE_FAILED"
 		stream.CancelRead(1)

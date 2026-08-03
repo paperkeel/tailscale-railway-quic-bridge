@@ -67,9 +67,9 @@ func TestDecodeUDPRejectsProtocolBoundaries(t *testing.T) {
 		data []byte
 	}{
 		{name: "short header", data: make([]byte, 11)},
-		{name: "unknown version", data: []byte{2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1}},
-		{name: "empty source", data: []byte{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0}},
-		{name: "truncated addresses", data: []byte{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 16}},
+		{name: "unknown version", data: []byte{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1}},
+		{name: "empty source", data: []byte{2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0}},
+		{name: "truncated addresses", data: []byte{2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 16}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -81,6 +81,6 @@ func TestDecodeUDPRejectsProtocolBoundaries(t *testing.T) {
 }
 
 func FuzzDecodeUDP(f *testing.F) {
-	f.Add([]byte{1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0})
+	f.Add([]byte{2, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0})
 	f.Fuzz(func(t *testing.T, data []byte) { _, _ = DecodeUDP(data) })
 }

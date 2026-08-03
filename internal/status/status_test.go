@@ -2,6 +2,7 @@ package status
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
@@ -69,6 +70,8 @@ func TestListenerServesStatusAndStopsWithContext(t *testing.T) {
 	for _, want := range []string{
 		"# HELP tailbridge_ready ",
 		"# TYPE tailbridge_ready gauge",
+		"tailbridge_connectors_configured 0",
+		"tailbridge_connectors_ready 0",
 		"tailbridge_tcp_flows_total 1",
 		"tailbridge_udp_flows_active 0",
 		"tailbridge_udp_flows_total 1",
@@ -85,6 +88,9 @@ func TestListenerServesStatusAndStopsWithContext(t *testing.T) {
 	}
 	for _, name := range []string{
 		"tailbridge_ready",
+		"tailbridge_connectors_configured",
+		"tailbridge_connectors_ready",
+		"tailbridge_connector_ready",
 		"tailbridge_tcp_flows_active",
 		"tailbridge_tcp_flows_total",
 		"tailbridge_udp_flows_active",
@@ -114,6 +120,50 @@ func TestListenerServesStatusAndStopsWithContext(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("Serve did not stop")
+	}
+}
+
+func TestConnectorReadinessAndStatus(t *testing.T) {
+	state := New("v2")
+	state.ConfigureConnectors([]Connector{
+		{ConnectorID: "first", Slot: 0, VirtualPrefix: "fd20::/16", RealPrefix: "fd12::/16"},
+		{ConnectorID: "second", Slot: 1, VirtualPrefix: "fd21::/16", RealPrefix: "fd12::/16"},
+	})
+	state.ConnectorReady("first", "first-session")
+	if snapshot := state.Snapshot(); snapshot.Ready || snapshot.ReadyConnectors != 1 || snapshot.ConfiguredConnectors != 2 {
+		t.Fatalf("Snapshot() = %#v after one connector became ready", snapshot)
+	}
+	state.ConnectorReady("second", "second-session")
+	if snapshot := state.Snapshot(); !snapshot.Ready || snapshot.ReadyConnectors != 2 {
+		t.Fatalf("Snapshot() = %#v after all connectors became ready", snapshot)
+	}
+	state.ConnectorClosed("first", "older-session")
+	if !state.Snapshot().Ready {
+		t.Fatal("an older session changed connector readiness")
+	}
+	state.ConnectorClosed("first", "first-session")
+	if state.Snapshot().Ready {
+		t.Fatal("Snapshot() stayed ready after a connector closed")
+	}
+
+	listener, err := state.Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = listener.Serve(ctx) }()
+	response, err := http.Get("http://" + listener.listener.Addr().String() + "/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var snapshot Snapshot
+	if err := json.NewDecoder(response.Body).Decode(&snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.ConfiguredConnectors != 2 || len(snapshot.Connectors) != 2 || snapshot.Connectors[0].ConnectorID != "first" {
+		t.Fatalf("GET /status returned %#v", snapshot)
 	}
 }
 
@@ -152,6 +202,31 @@ func TestReadyReportsUnavailable(t *testing.T) {
 	go func() { _ = listener.Serve(ctx) }()
 
 	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://"+listener.listener.Addr().String()+"/readyz", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusServiceUnavailable)
+	}
+}
+
+func TestHealthReportsNetworkUnavailable(t *testing.T) {
+	state := New("test")
+	state.SetHealthy(false)
+	listener, err := state.Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = listener.Serve(ctx) }()
+
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://"+listener.listener.Addr().String()+"/healthz", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -58,6 +58,7 @@ func setValidConnectorEnvironment(t *testing.T, adminAddress string) {
 	t.Helper()
 	certificate, key := testCredentials(t)
 	for name, value := range map[string]string{
+		"TB_EDGE_ID":                  "test-edge",
 		"TB_CONNECTOR_ID":             "test-connector",
 		"TB_ENVIRONMENT":              "test",
 		"TB_MTLS_CA_B64":              certificate,
@@ -66,6 +67,9 @@ func setValidConnectorEnvironment(t *testing.T, adminAddress string) {
 		"TB_ADMIN_LISTEN_ADDR":        adminAddress,
 		"TB_ALLOWED_DESTINATIONS":     "127.0.0.0/8",
 		"TB_EDGE_ENDPOINT":            "127.0.0.1:4433",
+		"TB_VIRTUAL_PREFIX":           "fd20::/16",
+		"TB_REAL_PREFIX":              "fd12::/16",
+		"TB_DNS_SUFFIX":               "test.railway.internal",
 		"PORT":                        "",
 		"OTEL_EXPORTER_OTLP_ENDPOINT": "",
 		"SENTRY_DSN":                  "",

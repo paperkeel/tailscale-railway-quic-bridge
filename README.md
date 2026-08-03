@@ -4,18 +4,19 @@ Tailbridge gives a tailnet direct access to Railway private services.
 
 Railway does not accept public UDP. This restriction can force a Railway Tailscale node through DERP.
 
-This project moves the Tailscale subnet router to a public edge host. A QUIC connector then reaches Railway through an outbound connection.
+This project moves the Tailscale subnet router to a public edge host. Outbound QUIC connectors then reach Railway environments.
 
 ```text
 Tailscale client
       │ direct WireGuard UDP
       ▼
 Tailbridge edge
-      │ authenticated QUIC
-      ▼
-Tailbridge connector
-      │
-Railway private services
+      │ authenticated QUIC sessions
+      ├───────────────┐
+      ▼               ▼
+Railway connector A  Railway connector B
+      │               │
+Railway project A    Railway project B
 ```
 
 ## Project status
@@ -28,7 +29,8 @@ Do not use Tailbridge for critical production traffic until the public system te
 
 ## Properties
 
-- One Tailbridge edge and Tailbridge connector serve all services in one Railway environment.
+- One shared Tailbridge edge serves up to 32 Railway environments.
+- Each Railway environment uses one stable connector slot and virtual IPv6 `/16`.
 - Tailnet clients need no software other than Tailscale.
 - The Tailbridge edge keeps one stable Tailscale identity.
 - Railway deployments do not register new Tailscale devices.
@@ -40,66 +42,36 @@ Do not use Tailbridge for critical production traffic until the public system te
 
 ## Requirements
 
-The Tailbridge edge host needs:
+You need GitHub, Cloudflare, DigitalOcean, Railway, and Tailscale accounts.
 
-- Linux.
-- Docker Compose.
-- A stable public IP address.
-- Public UDP ports `41641` and `4433`.
-- `/dev/net/tun`.
-- The `NET_ADMIN` and `NET_RAW` capabilities.
+The standard template deployment does not require a source fork. GitHub Actions runs the required Node.js and pnpm tools.
+
+Tailbridge uses SST to manage the shared edge and all connectors. Cloudflare R2 stores encrypted production state.
 
 The Railway environment needs private networking. Protected services must listen on IPv6.
 
-## Quick start
+## Deployment
 
-1. Build the Tailbridge CLI:
+You do not need to fork the Tailbridge source repository.
 
-   ```bash
-   go build -o tailbridge ./cmd/tailbridge
-   ```
+The standard deployment uses a repository from the public [Tailbridge SST template](https://github.com/bearfire-dev/tailbridge-sst-template).
 
-2. Generate the environment files for the Tailbridge edge and Tailbridge connector:
+The [setup procedure](docs/setup.md) contains all configuration and deployment steps.
 
-   ```bash
-   ./tailbridge init \
-     --output ./private \
-     --connector-id railway-production \
-     --environment production \
-     --edge-endpoint edge.example.com:4433
-   ```
+A stable connector slot keeps the project virtual addresses unchanged.
 
-3. Keep the generated directory private. The directory contains mutual TLS private keys.
+Tailbridge gives each service a project-qualified Railway hostname:
 
-4. Merge the generated policy fragment into the tailnet policy.
+```text
+postgres.billing.railway.internal
+api.billing.railway.internal
+```
 
-5. Add grants for the required users and ports.
+## Advanced SST use
 
-6. Set a tagged, non-ephemeral Tailscale credential in `private/edge.env`:
+The template uses the `@bearfire-dev/tailscale-railway-quic-bridge` package from GitHub Packages.
 
-   ```text
-   TS_AUTHKEY=YOUR_NON_EPHEMERAL_KEY
-   ```
-
-7. Deploy the Tailbridge edge with [the edge guide](docs/deployment-edge.md).
-
-8. Deploy the Tailbridge connector with [the Railway guide](docs/deployment-railway.md).
-
-9. Configure Tailscale split DNS:
-
-   ```text
-   Domain: railway.internal
-   Nameserver: fd12::10
-   ```
-
-10. If the tailnet policy does not approve routes automatically, approve `fd12::/16`.
-
-11. Access a service through its Railway private hostname:
-
-    ```bash
-    psql -h postgres.railway.internal -d DATABASE_NAME
-    curl http://api.railway.internal:3000
-    ```
+Advanced SST projects can import the `Tailbridge` component directly. The [setup procedure](docs/setup.md) contains the package and component details.
 
 ## Images
 
@@ -111,15 +83,14 @@ ghcr.io/bearfire-dev/tailscale-railway-quic-bridge-connector
 ghcr.io/bearfire-dev/tailscale-railway-quic-bridge-cli
 ```
 
-Use a version tag or digest. Do not use `latest`.
+The deployment workflow resolves each `master` image to an immutable digest. It stores the deployed digest pair in SST state.
 
 ## Documentation
 
 - [Architecture](docs/architecture.md)
 - [Configuration](docs/configuration.md)
 - [Design decisions](docs/design-decisions.md)
-- [Edge deployment](docs/deployment-edge.md)
-- [Railway deployment](docs/deployment-railway.md)
+- [Setup](docs/setup.md)
 - [Operations](docs/operations.md)
 - [Observability](docs/observability.md)
 - [Performance tests](docs/performance.md)
@@ -128,8 +99,9 @@ Use a version tag or digest. Do not use `latest`.
 
 ## Known limits
 
-- One Tailbridge edge and Tailbridge connector support one Railway environment.
-- The first release advertises Railway's shared `fd12::/16` range.
+- One shared Tailbridge edge supports 32 connector slots.
+- Connector slots map to `/16` networks inside `fd20::/11` by default.
+- A slot change changes all virtual addresses for that Railway project.
 - UDP payloads must fit the negotiated QUIC datagram size.
 - Tailbridge supports only TCP and UDP.
 - The Tailbridge edge requires Linux transparent proxy support.

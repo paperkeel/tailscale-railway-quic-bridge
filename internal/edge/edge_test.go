@@ -416,7 +416,7 @@ func TestAuthenticateRejectsInvalidHello(t *testing.T) {
 		{
 			name: "protocol version",
 			hello: protocol.ConnectorHello{
-				ProtocolVersion: "2.0",
+				ProtocolVersion: "1.0",
 				ConnectorID:     "railway-production",
 				Environment:     "production",
 				StartedUnixNano: now.UnixNano(),

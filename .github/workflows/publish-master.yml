@@ -1,0 +1,130 @@
+name: Publish master artifacts
+
+on:
+  workflow_run:
+    workflows: [CI]
+    branches: [master]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-master-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  images:
+    if: github.event.workflow_run.conclusion == 'success'
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [edge, connector]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        id: build
+        with:
+          context: .
+          file: Dockerfile.${{ matrix.component }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ghcr.io/bearfire-dev/tailscale-railway-quic-bridge-${{ matrix.component }}:sha-${{ github.event.workflow_run.head_sha }}
+          build-args: VERSION=sha-${{ github.event.workflow_run.head_sha }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=master-${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=master-${{ matrix.component }}
+      - name: Capture the image digest
+        env:
+          COMPONENT: ${{ matrix.component }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: printf '%s\n' "$DIGEST" > "${COMPONENT}-digest.txt"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ${{ matrix.component }}-digest
+          path: ${{ matrix.component }}-digest.txt
+          if-no-files-found: error
+          retention-days: 1
+      - uses: actions/attest-build-provenance@78e6cbd37d0ac1a40113c04f2037dacf1ea3f12e # v4
+        if: github.event.repository.visibility == 'public'
+        with:
+          subject-name: ghcr.io/bearfire-dev/tailscale-railway-quic-bridge-${{ matrix.component }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+  package:
+    needs: images
+    permissions:
+      contents: read
+      packages: write
+    runs-on: ubuntu-latest
+    env:
+      NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22
+          cache: pnpm
+          registry-url: https://npm.pkg.github.com
+          scope: "@bearfire-dev"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: "*-digest"
+          path: ${{ runner.temp }}/digests
+          merge-multiple: true
+      - run: pnpm install --frozen-lockfile
+      - name: Build the immutable package
+        env:
+          SOURCE_COMMIT: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          version="0.0.0-sha.$SOURCE_COMMIT"
+          edge_digest="$(cat "$RUNNER_TEMP/digests/edge-digest.txt")"
+          connector_digest="$(cat "$RUNNER_TEMP/digests/connector-digest.txt")"
+          export TAILBRIDGE_SOURCE_COMMIT="$SOURCE_COMMIT"
+          export TAILBRIDGE_PACKAGE_VERSION="$version"
+          export TAILBRIDGE_EDGE_IMAGE="ghcr.io/bearfire-dev/tailscale-railway-quic-bridge-edge@$edge_digest"
+          export TAILBRIDGE_CONNECTOR_IMAGE="ghcr.io/bearfire-dev/tailscale-railway-quic-bridge-connector@$connector_digest"
+          pnpm version "$version" --no-git-tag-version
+          pnpm build:metadata
+          pnpm pack --pack-destination "$RUNNER_TEMP"
+      - name: Test the packed package
+        env:
+          VERSION: 0.0.0-sha.${{ github.event.workflow_run.head_sha }}
+        run: |
+          package="$RUNNER_TEMP/bearfire-dev-tailscale-railway-quic-bridge-$VERSION.tgz"
+          test -f "$package"
+          test_directory="$RUNNER_TEMP/package-test"
+          mkdir -p "$test_directory"
+          printf '%s\n' '{"private":true,"type":"module"}' > "$test_directory/package.json"
+          pnpm --dir "$test_directory" add "$package"
+          pnpm --dir "$test_directory" exec node --input-type=module --eval \
+            "const module = await import('@bearfire-dev/tailscale-railway-quic-bridge'); if (typeof module.Tailbridge !== 'function') process.exit(1)"
+      - name: Publish the package
+        env:
+          VERSION: 0.0.0-sha.${{ github.event.workflow_run.head_sha }}
+        run: |
+          package="$RUNNER_TEMP/bearfire-dev-tailscale-railway-quic-bridge-$VERSION.tgz"
+          pnpm publish "$package" --access public --no-git-checks --tag "sha-${{ github.event.workflow_run.head_sha }}"
+          pnpm dist-tag add "@bearfire-dev/tailscale-railway-quic-bridge@$VERSION" master

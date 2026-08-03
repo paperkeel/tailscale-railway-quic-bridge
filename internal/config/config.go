@@ -1,9 +1,12 @@
 package config
 
 import (
+	"bytes"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
 	"os"
@@ -14,6 +17,7 @@ import (
 )
 
 type Common struct {
+	EdgeID      string
 	ConnectorID string
 	Environment string
 	CABundle    []byte
@@ -25,6 +29,7 @@ type Common struct {
 
 type Edge struct {
 	Common
+	Connectors      []ConnectorTarget
 	QUICListenAddr  string
 	TCPListenAddr   string
 	UDPListenAddr   string
@@ -38,6 +43,9 @@ type Edge struct {
 type Connector struct {
 	Common
 	EdgeEndpoint        string
+	VirtualPrefix       netip.Prefix
+	RealPrefix          netip.Prefix
+	DNSSuffix           string
 	AllowedDestinations []netip.Prefix
 	MaxTCPFlows         int64
 	MaxUDPFlows         int64
@@ -47,14 +55,36 @@ type Connector struct {
 	UDPIdleTimeout      time.Duration
 }
 
+type ConnectorTarget struct {
+	ConnectorID   string
+	Environment   string
+	Slot          int
+	VirtualPrefix netip.Prefix
+	RealPrefix    netip.Prefix
+	DNSSuffix     string
+}
+
+type connectorTargetJSON struct {
+	ConnectorID   string `json:"connectorId"`
+	Environment   string `json:"environment"`
+	Slot          int    `json:"slot"`
+	VirtualPrefix string `json:"virtualPrefix"`
+	RealPrefix    string `json:"realPrefix"`
+	DNSSuffix     string `json:"dnsSuffix"`
+}
+
 func LoadEdge() (Edge, error) {
-	c, err := loadCommon("127.0.0.1:9090")
+	c, err := loadCommon("127.0.0.1:9090", false)
 	if err != nil {
 		return Edge{}, err
 	}
-	routes, err := prefixes(required("TB_ALLOWED_ROUTES"))
+	connectors, err := connectorTargets(required("TB_CONNECTORS_B64"))
 	if err != nil {
-		return Edge{}, fmt.Errorf("TB_ALLOWED_ROUTES: %w", err)
+		return Edge{}, fmt.Errorf("TB_CONNECTORS_B64: %w", err)
+	}
+	routes := make([]netip.Prefix, 0, len(connectors))
+	for _, connector := range connectors {
+		routes = append(routes, connector.RealPrefix)
 	}
 	maxFlows, err := int64Value("TB_MAX_TCP_FLOWS", 4096)
 	if err != nil {
@@ -74,6 +104,7 @@ func LoadEdge() (Edge, error) {
 	}
 	edge := Edge{
 		Common:          c,
+		Connectors:      connectors,
 		QUICListenAddr:  value("TB_QUIC_LISTEN_ADDR", ":4433"),
 		TCPListenAddr:   value("TB_TCP_LISTEN_ADDR", "[::]:15001"),
 		UDPListenAddr:   value("TB_UDP_LISTEN_ADDR", "[::]:15002"),
@@ -105,13 +136,28 @@ func LoadConnector() (Connector, error) {
 		}
 		adminAddress = "[::]:" + port
 	}
-	c, err := loadCommon(adminAddress)
+	c, err := loadCommon(adminAddress, true)
 	if err != nil {
 		return Connector{}, err
 	}
 	destinations, err := prefixes(required("TB_ALLOWED_DESTINATIONS"))
 	if err != nil {
 		return Connector{}, fmt.Errorf("TB_ALLOWED_DESTINATIONS: %w", err)
+	}
+	virtualPrefix, err := ipv6Prefix16("TB_VIRTUAL_PREFIX", required("TB_VIRTUAL_PREFIX"))
+	if err != nil {
+		return Connector{}, err
+	}
+	if !netip.MustParsePrefix("fd20::/11").Contains(virtualPrefix.Addr()) {
+		return Connector{}, errors.New("TB_VIRTUAL_PREFIX must be inside fd20::/11")
+	}
+	realPrefix, err := ipv6Prefix16("TB_REAL_PREFIX", value("TB_REAL_PREFIX", "fd12::/16"))
+	if err != nil {
+		return Connector{}, err
+	}
+	dnsSuffix, err := dnsSuffixValue("TB_DNS_SUFFIX", required("TB_DNS_SUFFIX"))
+	if err != nil {
+		return Connector{}, err
 	}
 	dialTimeout, err := duration("TB_TCP_DIAL_TIMEOUT", 10*time.Second)
 	if err != nil {
@@ -153,6 +199,9 @@ func LoadConnector() (Connector, error) {
 	return Connector{
 		Common:              c,
 		EdgeEndpoint:        edgeEndpoint,
+		VirtualPrefix:       virtualPrefix,
+		RealPrefix:          realPrefix,
+		DNSSuffix:           dnsSuffix,
 		AllowedDestinations: destinations,
 		MaxTCPFlows:         maxFlows,
 		MaxUDPFlows:         maxUDPFlows,
@@ -163,7 +212,7 @@ func LoadConnector() (Connector, error) {
 	}, nil
 }
 
-func loadCommon(defaultAdmin string) (Common, error) {
+func loadCommon(defaultAdmin string, requireConnector bool) (Common, error) {
 	ca, err := decoded("TB_MTLS_CA_B64")
 	if err != nil {
 		return Common{}, err
@@ -177,6 +226,7 @@ func loadCommon(defaultAdmin string) (Common, error) {
 		return Common{}, err
 	}
 	c := Common{
+		EdgeID:      required("TB_EDGE_ID"),
 		ConnectorID: required("TB_CONNECTOR_ID"),
 		Environment: required("TB_ENVIRONMENT"),
 		CABundle:    ca,
@@ -185,13 +235,19 @@ func loadCommon(defaultAdmin string) (Common, error) {
 		AdminAddr:   value("TB_ADMIN_LISTEN_ADDR", defaultAdmin),
 		LogLevel:    value("TB_LOG_LEVEL", "info"),
 	}
-	if c.ConnectorID == "" || c.Environment == "" {
+	if c.EdgeID == "" {
+		return Common{}, errors.New("TB_EDGE_ID is required")
+	}
+	if !validName(c.EdgeID) {
+		return Common{}, errors.New("TB_EDGE_ID must start with a letter or digit and contain at most 63 letters, digits, periods, underscores, or hyphens")
+	}
+	if requireConnector && (c.ConnectorID == "" || c.Environment == "") {
 		return Common{}, errors.New("TB_CONNECTOR_ID and TB_ENVIRONMENT are required")
 	}
-	if !validName(c.ConnectorID) {
+	if c.ConnectorID != "" && !validName(c.ConnectorID) {
 		return Common{}, errors.New("TB_CONNECTOR_ID must start with a letter or digit and contain at most 63 letters, digits, periods, underscores, or hyphens")
 	}
-	if !validName(c.Environment) {
+	if c.Environment != "" && !validName(c.Environment) {
 		return Common{}, errors.New("TB_ENVIRONMENT must start with a letter or digit and contain at most 63 letters, digits, periods, underscores, or hyphens")
 	}
 	switch c.LogLevel {
@@ -200,6 +256,107 @@ func loadCommon(defaultAdmin string) (Common, error) {
 		return Common{}, fmt.Errorf("TB_LOG_LEVEL must be debug, info, warn, or error, got %q", c.LogLevel)
 	}
 	return c, nil
+}
+
+func connectorTargets(encoded string) ([]ConnectorTarget, error) {
+	if encoded == "" {
+		return nil, errors.New("is required")
+	}
+	payload, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return nil, fmt.Errorf("is not valid base64: %w", err)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	var values []connectorTargetJSON
+	if err := decoder.Decode(&values); err != nil {
+		return nil, fmt.Errorf("does not contain a valid connector array: %w", err)
+	}
+	if decoder.Decode(&struct{}{}) != io.EOF {
+		return nil, errors.New("contains data after the connector array")
+	}
+	if len(values) < 1 || len(values) > 32 {
+		return nil, errors.New("must contain from 1 through 32 connectors")
+	}
+	seenIDs := make(map[string]struct{}, len(values))
+	seenSlots := make(map[int]struct{}, len(values))
+	seenPrefixes := make(map[netip.Prefix]struct{}, len(values))
+	result := make([]ConnectorTarget, 0, len(values))
+	virtualRange := netip.MustParsePrefix("fd20::/11")
+	for index, value := range values {
+		if !validName(value.ConnectorID) || !validName(value.Environment) {
+			return nil, fmt.Errorf("connector %d has an invalid connectorId or environment", index)
+		}
+		if value.Slot < 0 || value.Slot > 31 {
+			return nil, fmt.Errorf("connector %q has slot %d outside 0 through 31", value.ConnectorID, value.Slot)
+		}
+		virtualPrefix, err := ipv6Prefix16("virtualPrefix", value.VirtualPrefix)
+		if err != nil || !virtualRange.Contains(virtualPrefix.Addr()) {
+			return nil, fmt.Errorf("connector %q virtualPrefix must be an IPv6 /16 inside fd20::/11", value.ConnectorID)
+		}
+		virtualBytes := virtualPrefix.Addr().As16()
+		if int(virtualBytes[1]-0x20) != value.Slot {
+			return nil, fmt.Errorf("connector %q virtualPrefix does not match slot %d", value.ConnectorID, value.Slot)
+		}
+		realPrefix, err := ipv6Prefix16("realPrefix", value.RealPrefix)
+		if err != nil {
+			return nil, fmt.Errorf("connector %q: %w", value.ConnectorID, err)
+		}
+		suffix, err := dnsSuffixValue("dnsSuffix", value.DNSSuffix)
+		if err != nil {
+			return nil, fmt.Errorf("connector %q: %w", value.ConnectorID, err)
+		}
+		if _, exists := seenIDs[value.ConnectorID]; exists {
+			return nil, fmt.Errorf("connectorId %q occurs more than once", value.ConnectorID)
+		}
+		if _, exists := seenSlots[value.Slot]; exists {
+			return nil, fmt.Errorf("slot %d occurs more than once", value.Slot)
+		}
+		if _, exists := seenPrefixes[virtualPrefix]; exists {
+			return nil, fmt.Errorf("virtualPrefix %q occurs more than once", virtualPrefix)
+		}
+		seenIDs[value.ConnectorID] = struct{}{}
+		seenSlots[value.Slot] = struct{}{}
+		seenPrefixes[virtualPrefix] = struct{}{}
+		result = append(result, ConnectorTarget{
+			ConnectorID: value.ConnectorID, Environment: value.Environment, Slot: value.Slot,
+			VirtualPrefix: virtualPrefix, RealPrefix: realPrefix, DNSSuffix: suffix,
+		})
+	}
+	return result, nil
+}
+
+func ipv6Prefix16(name, raw string) (netip.Prefix, error) {
+	prefix, err := netip.ParsePrefix(strings.TrimSpace(raw))
+	if err != nil || !prefix.Addr().Is6() || prefix.Bits() != 16 || prefix != prefix.Masked() {
+		return netip.Prefix{}, fmt.Errorf("%s must be a canonical IPv6 /16", name)
+	}
+	return prefix, nil
+}
+
+func dnsSuffixValue(name, raw string) (string, error) {
+	suffix := strings.ToLower(strings.Trim(strings.TrimSpace(raw), "."))
+	if suffix == "" || suffix == "railway.internal" || !strings.HasSuffix(suffix, ".railway.internal") {
+		return "", fmt.Errorf("%s must be a subdomain of railway.internal", name)
+	}
+	for _, label := range strings.Split(suffix, ".") {
+		if !validDNSLabel(label) {
+			return "", fmt.Errorf("%s contains an invalid DNS label", name)
+		}
+	}
+	return suffix, nil
+}
+
+func validDNSLabel(label string) bool {
+	if len(label) < 1 || len(label) > 63 || !asciiLetterOrDigit(label[0]) || !asciiLetterOrDigit(label[len(label)-1]) {
+		return false
+	}
+	for index := 1; index < len(label)-1; index++ {
+		if !asciiLetterOrDigit(label[index]) && label[index] != '-' {
+			return false
+		}
+	}
+	return true
 }
 
 func validName(value string) bool {

@@ -1,0 +1,170 @@
+import { isIP } from "node:net";
+
+import type {
+	TailbridgeArgs,
+	TailbridgeConnectorTarget,
+} from "./tailbridge";
+
+export type SSTHome = "cloudflare" | "local";
+
+export interface NormalizedConnectorTarget extends TailbridgeConnectorTarget {
+	region: string;
+	realPrefix: string;
+	virtualPrefix: string;
+	dnsSuffix: string;
+	nameserver: string;
+}
+
+export interface NormalizedTailbridgeArgs extends Omit<TailbridgeArgs, "connectors"> {
+	virtualNetwork: string;
+	connectors: NormalizedConnectorTarget[];
+}
+
+const namePattern = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+const defaultVirtualNetwork = "fd20::/11";
+const defaultRealPrefix = "fd12::/16";
+const defaultRailwayRegion = "us-west2";
+
+export function parseHome(value: string | undefined): SSTHome {
+	const home = value?.trim() || "cloudflare";
+	if (home !== "cloudflare" && home !== "local") {
+		throw new Error("SST_HOME must be cloudflare or local.");
+	}
+	return home;
+}
+
+export function normalizeTailbridgeArgs(
+	args: TailbridgeArgs,
+): NormalizedTailbridgeArgs {
+	validateName("stage", args.stage);
+	validateName("edgeId", args.edgeId);
+	if (args.edge.provider !== "digitalocean") {
+		throw new Error("edge.provider must be digitalocean.");
+	}
+	if (!args.edge.region.trim() || !args.edge.size.trim()) {
+		throw new Error("edge.region and edge.size must not be empty.");
+	}
+	if (args.edge.sshSourceCidrs.length === 0) {
+		throw new Error("edge.sshSourceCidrs must contain at least one CIDR.");
+	}
+	for (const cidr of args.edge.sshSourceCidrs) {
+		validateCidr("edge.sshSourceCidrs", cidr);
+	}
+	if (args.connectors.length === 0 || args.connectors.length > 32) {
+		throw new Error("connectors must contain between 1 and 32 targets.");
+	}
+
+	const virtualNetwork = args.virtualNetwork ?? defaultVirtualNetwork;
+	const virtualBase = parseIpv6Prefix(virtualNetwork, 11, "virtualNetwork");
+	const names = new Set<string>();
+	const slots = new Set<number>();
+	const connectors = args.connectors.map((target) => {
+		validateTarget(target);
+		if (names.has(target.name)) {
+			throw new Error(`connector name ${target.name} must be unique.`);
+		}
+		if (slots.has(target.slot)) {
+			throw new Error(`connector slot ${target.slot} must be unique.`);
+		}
+		names.add(target.name);
+		slots.add(target.slot);
+
+		const realPrefix = target.realPrefix ?? defaultRealPrefix;
+		parseIpv6Prefix(realPrefix, 16, `connector ${target.name} realPrefix`);
+		const virtualPrefix = formatIpv6Prefix(
+			virtualBase | (BigInt(target.slot) << 112n),
+			16,
+		);
+		return {
+			...target,
+			region: target.region ?? defaultRailwayRegion,
+			realPrefix,
+			virtualPrefix,
+			dnsSuffix: `${target.name}.railway.internal`,
+			nameserver: `${virtualPrefix.slice(0, -3)}10`,
+		};
+	});
+
+	return { ...args, virtualNetwork, connectors };
+}
+
+function validateTarget(target: TailbridgeConnectorTarget): void {
+	validateName("connector name", target.name);
+	if (!Number.isInteger(target.slot) || target.slot < 0 || target.slot > 31) {
+		throw new Error(`connector ${target.name} slot must be an integer from 0 to 31.`);
+	}
+	if (target.region !== undefined && !target.region.trim()) {
+		throw new Error(`connector ${target.name} region must not be empty.`);
+	}
+}
+
+function validateName(label: string, value: string): void {
+	if (!namePattern.test(value)) {
+		throw new Error(`${label} must match ${namePattern.source}.`);
+	}
+}
+
+function validateCidr(label: string, value: string): void {
+	const [address, prefix, extra] = value.split("/");
+	const version = isIP(address);
+	if (extra !== undefined || version === 0 || !/^\d+$/.test(prefix ?? "")) {
+		throw new Error(`${label} must contain valid CIDRs.`);
+	}
+	const length = Number(prefix);
+	if (length < 0 || length > (version === 4 ? 32 : 128)) {
+		throw new Error(`${label} must contain valid CIDRs.`);
+	}
+}
+
+function parseIpv6Prefix(value: string, length: number, label: string): bigint {
+	const [address, prefix, extra] = value.split("/");
+	if (extra !== undefined || prefix !== String(length) || isIP(address) !== 6) {
+		throw new Error(`${label} must be an IPv6 /${length} prefix.`);
+	}
+	const groups = expandIpv6(address);
+	let result = 0n;
+	for (const group of groups) {
+		result = (result << 16n) | BigInt(Number.parseInt(group, 16));
+	}
+	const hostBits = 128n - BigInt(length);
+	const mask = ((1n << 128n) - 1n) ^ ((1n << hostBits) - 1n);
+	if ((result & mask) !== result) {
+		throw new Error(`${label} must use a canonical network address.`);
+	}
+	return result;
+}
+
+function expandIpv6(address: string): string[] {
+	const [left = "", right = "", ...extra] = address.split("::");
+	if (extra.length > 0) {
+		throw new Error("The IPv6 address is invalid.");
+	}
+	const leftGroups = left ? left.split(":") : [];
+	const rightGroups = right ? right.split(":") : [];
+	const missing = 8 - leftGroups.length - rightGroups.length;
+	return [...leftGroups, ...Array.from({ length: missing }, () => "0"), ...rightGroups];
+}
+
+function formatIpv6Prefix(value: bigint, length: number): string {
+	const groups = Array.from({ length: 8 }, (_, index) =>
+		Number((value >> BigInt((7 - index) * 16)) & 0xffffn).toString(16),
+	);
+	let bestStart = -1;
+	let bestLength = 0;
+	for (let start = 0; start < groups.length; start += 1) {
+		if (groups[start] !== "0") continue;
+		let end = start;
+		while (end < groups.length && groups[end] === "0") end += 1;
+		if (end - start > bestLength) {
+			bestStart = start;
+			bestLength = end - start;
+		}
+		start = end - 1;
+	}
+	if (bestLength > 1) {
+		groups.splice(bestStart, bestLength, "");
+		if (bestStart === 0) groups.unshift("");
+		if (bestStart + bestLength === 8) groups.push("");
+	}
+	return `${groups.join(":")}/${length}`;
+}

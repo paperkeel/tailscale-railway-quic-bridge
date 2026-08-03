@@ -1,11 +1,13 @@
 package status
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -14,7 +16,10 @@ import (
 )
 
 type Server struct {
+	healthy      atomic.Bool
 	ready        atomic.Bool
+	connectorsMu sync.RWMutex
+	connectors   map[string]Connector
 	active       atomic.Int64
 	flows        atomic.Uint64
 	udpActive    atomic.Int64
@@ -32,14 +37,98 @@ type Server struct {
 	version      string
 }
 
-func New(version string) *Server      { return &Server{version: version} }
-func (s *Server) SetReady(value bool) { s.ready.Store(value) }
-func (s *Server) FlowStarted()        { s.active.Add(1); s.flows.Add(1) }
-func (s *Server) FlowEnded()          { s.active.Add(-1) }
-func (s *Server) UDPFlowStarted()     { s.udpActive.Add(1); s.udpFlows.Add(1) }
-func (s *Server) UDPFlowEnded()       { s.udpActive.Add(-1) }
-func (s *Server) DatagramDropped()    { s.udpDropped.Add(1) }
-func (s *Server) Denied()             { s.denied.Add(1) }
+type Connector struct {
+	ConnectorID   string `json:"connector_id"`
+	Slot          int    `json:"slot"`
+	VirtualPrefix string `json:"virtual_prefix"`
+	RealPrefix    string `json:"real_prefix"`
+	Ready         bool   `json:"ready"`
+	SessionID     string `json:"session_id,omitempty"`
+}
+
+type Snapshot struct {
+	Version              string      `json:"version"`
+	Healthy              bool        `json:"healthy"`
+	Ready                bool        `json:"ready"`
+	ConfiguredConnectors int         `json:"configured_connectors"`
+	ReadyConnectors      int         `json:"ready_connectors"`
+	Connectors           []Connector `json:"connectors"`
+}
+
+func New(version string) *Server {
+	server := &Server{version: version, connectors: make(map[string]Connector)}
+	server.healthy.Store(true)
+	return server
+}
+func (s *Server) SetHealthy(value bool) { s.healthy.Store(value) }
+func (s *Server) SetReady(value bool)   { s.ready.Store(value) }
+func (s *Server) FlowStarted()          { s.active.Add(1); s.flows.Add(1) }
+func (s *Server) FlowEnded()            { s.active.Add(-1) }
+func (s *Server) UDPFlowStarted()       { s.udpActive.Add(1); s.udpFlows.Add(1) }
+func (s *Server) UDPFlowEnded()         { s.udpActive.Add(-1) }
+func (s *Server) DatagramDropped()      { s.udpDropped.Add(1) }
+func (s *Server) Denied()               { s.denied.Add(1) }
+
+func (s *Server) ConfigureConnectors(connectors []Connector) {
+	s.connectorsMu.Lock()
+	s.connectors = make(map[string]Connector, len(connectors))
+	for _, connector := range connectors {
+		connector.Ready = false
+		connector.SessionID = ""
+		s.connectors[connector.ConnectorID] = connector
+	}
+	s.connectorsMu.Unlock()
+	s.updateReady()
+}
+
+func (s *Server) ConnectorReady(connectorID, sessionID string) {
+	s.connectorsMu.Lock()
+	connector, ok := s.connectors[connectorID]
+	if ok {
+		connector.Ready = true
+		connector.SessionID = sessionID
+		s.connectors[connectorID] = connector
+	}
+	s.connectorsMu.Unlock()
+	s.updateReady()
+}
+
+func (s *Server) ConnectorClosed(connectorID, sessionID string) {
+	s.connectorsMu.Lock()
+	connector, ok := s.connectors[connectorID]
+	if ok && connector.SessionID == sessionID {
+		connector.Ready = false
+		connector.SessionID = ""
+		s.connectors[connectorID] = connector
+	}
+	s.connectorsMu.Unlock()
+	s.updateReady()
+}
+
+func (s *Server) Snapshot() Snapshot {
+	s.connectorsMu.RLock()
+	connectors := make([]Connector, 0, len(s.connectors))
+	ready := 0
+	for _, connector := range s.connectors {
+		connectors = append(connectors, connector)
+		if connector.Ready {
+			ready++
+		}
+	}
+	s.connectorsMu.RUnlock()
+	slices.SortFunc(connectors, func(left, right Connector) int { return cmp.Compare(left.Slot, right.Slot) })
+	allReady := s.ready.Load()
+	if len(connectors) > 0 {
+		allReady = ready == len(connectors)
+	}
+	return Snapshot{Version: s.version, Healthy: s.healthy.Load(), Ready: allReady, ConfiguredConnectors: len(connectors), ReadyConnectors: ready, Connectors: connectors}
+}
+
+func (s *Server) updateReady() {
+	if snapshot := s.Snapshot(); snapshot.ConfiguredConnectors > 0 {
+		s.ready.Store(snapshot.Ready)
+	}
+}
 
 type Listener struct {
 	listener net.Listener
@@ -126,7 +215,13 @@ func (s *Server) resetQUICMetrics() {
 
 func (s *Server) Listen(addr string) (*Listener, error) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", getOnly(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+	mux.HandleFunc("/healthz", getOnly(func(w http.ResponseWriter, _ *http.Request) {
+		if !s.healthy.Load() {
+			http.Error(w, "Tailbridge is not healthy.", http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
 	mux.HandleFunc("/readyz", getOnly(func(w http.ResponseWriter, _ *http.Request) {
 		if !s.ready.Load() {
 			http.Error(w, "Tailbridge is not ready.", http.StatusServiceUnavailable)
@@ -138,15 +233,28 @@ func (s *Server) Listen(addr string) (*Listener, error) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"version": s.version})
 	}))
+	mux.HandleFunc("/status", getOnly(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(s.Snapshot())
+	}))
 	mux.HandleFunc("/metrics", getOnly(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		ready := 0
 		if s.ready.Load() {
 			ready = 1
 		}
+		snapshot := s.Snapshot()
 		_, _ = fmt.Fprintf(w, `# HELP tailbridge_ready Whether Tailbridge is ready to serve traffic.
 # TYPE tailbridge_ready gauge
 tailbridge_ready %d
+# HELP tailbridge_connectors_configured Configured connector count.
+# TYPE tailbridge_connectors_configured gauge
+tailbridge_connectors_configured %d
+# HELP tailbridge_connectors_ready Ready connector count.
+# TYPE tailbridge_connectors_ready gauge
+tailbridge_connectors_ready %d
+# HELP tailbridge_connector_ready Whether a configured connector is ready.
+# TYPE tailbridge_connector_ready gauge
 # HELP tailbridge_tcp_flows_active Current active TCP flows.
 # TYPE tailbridge_tcp_flows_active gauge
 tailbridge_tcp_flows_active %d
@@ -183,7 +291,14 @@ tailbridge_quic_send_bits_per_second %d
 # HELP tailbridge_quic_receive_bits_per_second Current QUIC receive throughput in bits per second.
 # TYPE tailbridge_quic_receive_bits_per_second gauge
 tailbridge_quic_receive_bits_per_second %d
-`, ready, s.active.Load(), s.flows.Load(), s.udpActive.Load(), s.udpFlows.Load(), s.udpDropped.Load(), s.denied.Load(), s.quicRTT.Load(), s.quicSent.Load(), s.quicReceived.Load(), s.quicLost.Load(), s.quicSendRate.Load(), s.quicRecvRate.Load())
+`, ready, snapshot.ConfiguredConnectors, snapshot.ReadyConnectors, s.active.Load(), s.flows.Load(), s.udpActive.Load(), s.udpFlows.Load(), s.udpDropped.Load(), s.denied.Load(), s.quicRTT.Load(), s.quicSent.Load(), s.quicReceived.Load(), s.quicLost.Load(), s.quicSendRate.Load(), s.quicRecvRate.Load())
+		for _, connector := range snapshot.Connectors {
+			connectorReady := 0
+			if connector.Ready {
+				connectorReady = 1
+			}
+			_, _ = fmt.Fprintf(w, "tailbridge_connector_ready{connector_id=%q,slot=%q} %d\n", connector.ConnectorID, fmt.Sprint(connector.Slot), connectorReady)
+		}
 	}))
 	var listenConfig net.ListenConfig
 	listener, err := listenConfig.Listen(context.Background(), "tcp", addr)
