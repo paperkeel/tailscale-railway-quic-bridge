@@ -198,8 +198,8 @@ function resolveImages(
 }
 
 function validateImmutableImage(component: string, image: string): void {
-	const digest = /@sha256:[a-f0-9]{64}$/i;
-	const commitTag = /:sha-[a-f0-9]{40}$/i;
+	const digest = /@sha256:[a-f0-9]{64}$/;
+	const commitTag = /:sha-[a-f0-9]{40}$/;
 	if (!digest.test(image) && !commitTag.test(image)) {
 		throw new Error(
 			`${component} image must use a SHA-256 digest or a full commit SHA tag.`,

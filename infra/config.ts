@@ -54,8 +54,13 @@ export function normalizeTailbridgeArgs(
 		throw new Error("connectors must contain between 1 and 32 targets.");
 	}
 
-	const virtualNetwork = args.virtualNetwork ?? defaultVirtualNetwork;
-	const virtualBase = parseIpv6Prefix(virtualNetwork, 11, "virtualNetwork");
+	const requestedVirtualNetwork = args.virtualNetwork ?? defaultVirtualNetwork;
+	const virtualBase = parseIpv6Prefix(
+		requestedVirtualNetwork,
+		11,
+		"virtualNetwork",
+	);
+	const virtualNetwork = formatIpv6Prefix(virtualBase, 11);
 	const names = new Set<string>();
 	const slots = new Set<number>();
 	const connectors = args.connectors.map((target) => {

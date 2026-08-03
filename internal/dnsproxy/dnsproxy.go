@@ -8,14 +8,15 @@ import (
 	"net"
 	"net/netip"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/miekg/dns"
 )
 
 const (
-	railwaySuffix   = "railway.internal."
-	tcpDrainTimeout = 250 * time.Millisecond
+	railwaySuffix      = "railway.internal."
+	tcpResponseTimeout = 10 * time.Second
 )
 
 type Rewriter struct {
@@ -185,6 +186,7 @@ func replaceSuffix(name, from, to string) (string, bool) {
 }
 
 func (r *Rewriter) ForwardTCP(client io.ReadWriteCloser, upstream net.Conn) (int64, int64, error) {
+	var draining atomic.Bool
 	type result struct {
 		query bool
 		bytes int64
@@ -197,7 +199,11 @@ func (r *Rewriter) ForwardTCP(client io.ReadWriteCloser, upstream net.Conn) (int
 		results <- result{query: true, bytes: count, err: err}
 	}()
 	go func() {
-		count, err := r.forwardResponses(upstream, client)
+		count, err := r.forwardResponses(upstream, client, func() {
+			if draining.Load() {
+				_ = upstream.SetReadDeadline(time.Now().Add(tcpResponseTimeout))
+			}
+		})
 		closeWrite(client)
 		results <- result{bytes: count, err: err}
 	}()
@@ -206,7 +212,8 @@ func (r *Rewriter) ForwardTCP(client io.ReadWriteCloser, upstream net.Conn) (int
 		_ = upstream.Close()
 		_ = client.Close()
 	} else {
-		_ = upstream.SetReadDeadline(time.Now().Add(tcpDrainTimeout))
+		draining.Store(true)
+		_ = upstream.SetReadDeadline(time.Now().Add(tcpResponseTimeout))
 	}
 	second := <-results
 	_ = upstream.Close()
@@ -228,10 +235,6 @@ func closeWrite(connection any) {
 
 func transferError(err error) error {
 	if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
-		return nil
-	}
-	var networkError net.Error
-	if errors.As(err, &networkError) && networkError.Timeout() {
 		return nil
 	}
 	return err
@@ -258,7 +261,11 @@ func (r *Rewriter) forwardQueries(source io.Reader, destination io.Writer) (int6
 	}
 }
 
-func (r *Rewriter) forwardResponses(source io.Reader, destination io.Writer) (int64, error) {
+func (r *Rewriter) forwardResponses(
+	source io.Reader,
+	destination io.Writer,
+	refreshDeadline func(),
+) (int64, error) {
 	var count int64
 	for {
 		message, err := readTCPMessage(source)
@@ -274,6 +281,9 @@ func (r *Rewriter) forwardResponses(source io.Reader, destination io.Writer) (in
 			return count, err
 		}
 		count += int64(len(payload) + 2)
+		if refreshDeadline != nil {
+			refreshDeadline()
+		}
 	}
 }
 

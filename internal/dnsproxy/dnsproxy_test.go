@@ -47,6 +47,7 @@ func TestForwardTCPRewritesQueriesAndResponses(t *testing.T) {
 		done <- err
 	}()
 	go func() {
+		defer upstream.Close()
 		request, err := readTCPMessage(upstream)
 		if err != nil {
 			return
@@ -175,12 +176,12 @@ func TestForwardTCPPreservesResponseAfterClientHalfClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer clientListener.Close()
+	defer func() { _ = clientListener.Close() }()
 	upstreamListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer upstreamListener.Close()
+	defer func() { _ = upstreamListener.Close() }()
 
 	done := make(chan error, 1)
 	go func() {
@@ -189,7 +190,12 @@ func TestForwardTCPPreservesResponseAfterClientHalfClose(t *testing.T) {
 			done <- acceptErr
 			return
 		}
-		proxyUpstream, dialErr := net.Dial("tcp", upstreamListener.Addr().String())
+		var dialer net.Dialer
+		proxyUpstream, dialErr := dialer.DialContext(
+			t.Context(),
+			"tcp",
+			upstreamListener.Addr().String(),
+		)
 		if dialErr != nil {
 			done <- dialErr
 			return
@@ -202,7 +208,7 @@ func TestForwardTCPPreservesResponseAfterClientHalfClose(t *testing.T) {
 		if acceptErr != nil {
 			return
 		}
-		defer upstream.Close()
+		defer func() { _ = upstream.Close() }()
 		request, readErr := readTCPMessage(upstream)
 		if readErr != nil {
 			return
@@ -210,6 +216,7 @@ func TestForwardTCPPreservesResponseAfterClientHalfClose(t *testing.T) {
 		response := new(dns.Msg)
 		response.SetReply(request)
 		response.Answer = []dns.RR{&dns.AAAA{Hdr: dns.RR_Header{Name: request.Question[0].Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET}, AAAA: net.ParseIP("fd12::55")}}
+		time.Sleep(300 * time.Millisecond)
 		payload, packErr := response.Pack()
 		if packErr == nil {
 			_ = writeTCPMessage(upstream, payload)

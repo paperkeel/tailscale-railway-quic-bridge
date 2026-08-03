@@ -132,7 +132,7 @@ describe("requestRailwayGraphql", () => {
 		expect(request.mock.calls[0]?.[1]?.signal).toBeInstanceOf(AbortSignal);
 	});
 
-	it("rejects a mutation result that returns false", async () => {
+	it("returns false fields for callers to interpret", async () => {
 		const request = vi.fn<typeof fetch>().mockResolvedValue(
 			new Response(JSON.stringify({ data: { serviceInstanceUpdate: false } }), {
 				status: 200,
@@ -140,9 +140,7 @@ describe("requestRailwayGraphql", () => {
 		);
 		await expect(
 			requestRailwayGraphql("mutation TailbridgeTest { test }", {}, "token", request),
-		).rejects.toThrow(
-			"Railway GraphQL request failed (200): The mutation returned false.",
-		);
+		).resolves.toEqual({ serviceInstanceUpdate: false });
 	});
 });
 

@@ -57,15 +57,6 @@ export async function requestRailwayGraphql<T>(
 			`Railway GraphQL request failed (${response.status})${details ? `: ${details}` : "."}`,
 		);
 	}
-	if (
-		typeof result.data === "object" &&
-		result.data !== null &&
-		Object.values(result.data).some((value) => value === false)
-	) {
-		throw new Error(
-			`Railway GraphQL request failed (${response.status}): The mutation returned false.`,
-		);
-	}
 	return result.data;
 }
 
@@ -112,7 +103,7 @@ class RailwayServiceSettingsProvider
 	async delete(): Promise<void> {}
 
 	private async apply(inputs: RailwayServiceSettingsInputs): Promise<void> {
-		await this.graphql<{ serviceInstanceUpdate: boolean }>(
+		const serviceUpdate = await this.graphql<{ serviceInstanceUpdate: boolean }>(
 			`mutation TailbridgeServiceInstanceUpdate(
 				$environmentId: String!
 				$serviceId: String!
@@ -139,8 +130,13 @@ class RailwayServiceSettingsProvider
 				},
 			},
 		);
+		if (!serviceUpdate.serviceInstanceUpdate) {
+			throw new Error("Railway rejected the service instance update.");
+		}
 
-		await this.graphql<{ environmentPatchCommit: boolean }>(
+		const environmentUpdate = await this.graphql<{
+			environmentPatchCommit: boolean;
+		}>(
 			`mutation TailbridgeEnvironmentPatchCommit(
 				$environmentId: String!
 				$patch: EnvironmentConfig!
@@ -162,6 +158,9 @@ class RailwayServiceSettingsProvider
 				},
 			},
 		);
+		if (!environmentUpdate.environmentPatchCommit) {
+			throw new Error("Railway rejected the environment patch.");
+		}
 	}
 
 	private async graphql<T>(

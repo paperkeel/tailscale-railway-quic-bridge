@@ -354,7 +354,11 @@ func (s *Server) authenticate(ctx context.Context, conn *quic.Conn) {
 	if len(s.registry) == 0 {
 		s.status.SetReady(true)
 	}
-	go s.status.ObserveConnectorQUIC(hello.ConnectorID, conn.Context().Done(), conn)
+	if len(s.registry) == 0 {
+		go s.status.ObserveQUIC(conn.Context().Done(), conn)
+	} else {
+		go s.status.ObserveConnectorQUIC(hello.ConnectorID, conn.Context().Done(), conn)
+	}
 	s.logger.Info("connector session ready", "event.name", "connector.session", "session_id", id, "connector_id", hello.ConnectorID, "slot", entry.target.Slot, "version", hello.SoftwareVersion)
 	go s.receiveUDP(next)
 	if previous != nil {

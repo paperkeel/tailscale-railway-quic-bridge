@@ -44,6 +44,14 @@ describe("normalizeTailbridgeArgs", () => {
 		]);
 	});
 
+	it("canonicalizes equivalent virtual network spellings", () => {
+		const normalized = normalizeTailbridgeArgs({
+			...args([{ name: "api", slot: 0 }]),
+			virtualNetwork: "fd20:0::/11",
+		});
+		expect(normalized.virtualNetwork).toBe("fd20::/11");
+	});
+
 	it.each([
 		[
 			args([{ name: "api", slot: 0 }, { name: "api", slot: 1 }]),
