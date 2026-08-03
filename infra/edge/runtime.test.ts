@@ -80,6 +80,11 @@ describe("edge runtime rendering", () => {
 		expect(() => edgeImageReference("registry.example/edge:latest")).toThrow(
 			"latest tag",
 		);
+		expect(() =>
+			edgeImageReference(
+				`registry.example/edge:latest@sha256:${"a".repeat(64)}`,
+			),
+		).toThrow("latest tag");
 		expect(() => edgeImageReference("registry.example/edge")).toThrow(
 			"tag or digest",
 		);

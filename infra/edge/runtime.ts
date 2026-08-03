@@ -105,7 +105,11 @@ export function edgeImageReference(image: string): string {
 	if (image !== image.trim() || !image || /\s/.test(image)) {
 		throw new Error("The edge image reference must not contain whitespace.");
 	}
-	if (image === "latest" || image.endsWith(":latest")) {
+	const repositoryAndTag = image.split("@", 1)[0];
+	if (
+		repositoryAndTag === "latest" ||
+		repositoryAndTag.endsWith(":latest")
+	) {
 		throw new Error("The edge image reference must not use the latest tag.");
 	}
 	if (image.startsWith("sha256:")) {
