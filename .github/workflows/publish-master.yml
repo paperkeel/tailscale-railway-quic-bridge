@@ -58,14 +58,6 @@ jobs:
           sbom: true
           cache-from: type=gha,scope=master-${{ matrix.component }}
           cache-to: type=gha,mode=max,scope=master-${{ matrix.component }},ignore-error=true
-      - name: Make the deployment image public
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PACKAGE_NAME: tailscale-railway-quic-bridge-${{ matrix.component }}
-        run: >-
-          gh api --method PATCH
-          "/orgs/${{ github.repository_owner }}/packages/container/$PACKAGE_NAME"
-          --field visibility=public
       - name: Capture the image digest
         env:
           COMPONENT: ${{ matrix.component }}
