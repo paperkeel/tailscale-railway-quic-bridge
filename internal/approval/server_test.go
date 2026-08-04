@@ -69,6 +69,15 @@ func TestTagMatching(t *testing.T) {
 	}
 }
 
+func TestPendingExpired(t *testing.T) {
+	if !pendingExpired(registry.PendingRequest{State: "pending", ExpiresAt: time.Now().Add(-time.Second)}) {
+		t.Fatal("pendingExpired() accepted an expired request")
+	}
+	if pendingExpired(registry.PendingRequest{State: "approved", ExpiresAt: time.Now().Add(-time.Second)}) {
+		t.Fatal("pendingExpired() rejected an approved request")
+	}
+}
+
 func TestApprovalServerRunsAndStops(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

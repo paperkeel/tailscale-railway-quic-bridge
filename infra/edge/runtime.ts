@@ -13,6 +13,7 @@ export interface EdgeEnvironment {
 		connectorId: string;
 		projectId: string;
 		environment: string;
+		environmentName: string;
 		slot: number;
 		virtualPrefix: string;
 		realPrefix: string;

@@ -120,6 +120,7 @@ function connector(name: string, slot: number, virtualPrefix: string) {
 		connectorId: name,
 		projectId: `${name}-project`,
 		environment: "production",
+		environmentName: "production",
 		slot,
 		virtualPrefix,
 		realPrefix: "fd12::/16",

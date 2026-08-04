@@ -180,7 +180,11 @@ export function createDigitalOceanEdge(
 			oidcPolicies: pulumi.output(args.registration?.oidcPolicies ?? []),
 			connectorIdentities: pulumi.all(
 				args.connectors.map((connector) =>
-					pulumi.all([connector.projectId, connector.environment]),
+					pulumi.all([
+						connector.projectId,
+						connector.environment,
+						connector.environmentName,
+					]),
 				),
 			),
 		})
@@ -202,6 +206,7 @@ export function createDigitalOceanEdge(
 						...connector,
 						projectId: String(connectorIdentities[index][0]),
 						environment: String(connectorIdentities[index][1]),
+						environmentName: String(connectorIdentities[index][2]),
 					})),
 					caCertB64: String(caCertB64),
 					edgeCertB64: String(edgeCertB64),

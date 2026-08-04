@@ -134,7 +134,10 @@ func (s *Server) process(ctx context.Context, source net.Addr, request protocol.
 		}
 		pending, err := s.store.Pending(ctx, request.RequestID)
 		if err != nil {
-			return protocol.RegistrationResponse{RequestID: request.RequestID, State: "expired", ErrorCode: "request_not_found"}
+			if errors.Is(err, registry.ErrNotFound) {
+				return protocol.RegistrationResponse{RequestID: request.RequestID, State: "expired", ErrorCode: "request_not_found"}
+			}
+			return protocol.RegistrationResponse{RequestID: request.RequestID, State: "rejected", ErrorCode: "internal_error", RetryAfterMS: 1000}
 		}
 		return s.responseForPending(ctx, pending)
 	}

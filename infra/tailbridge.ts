@@ -96,7 +96,8 @@ export class Tailbridge extends pulumi.ComponentResource {
 			connectors: normalized.connectors.map((target) => ({
 				connectorId: target.name,
 				projectId: target.projectId,
-				environment: target.environmentName ?? target.name,
+				environment: target.environmentId,
+				environmentName: target.environmentName ?? target.name,
 				slot: target.slot,
 				virtualPrefix: target.virtualPrefix,
 				realPrefix: target.realPrefix,

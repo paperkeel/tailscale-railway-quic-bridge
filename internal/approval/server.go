@@ -127,7 +127,15 @@ func (s *Server) pendingForIdentity(response http.ResponseWriter, request *http.
 		return
 	}
 	pending := requests[len(requests)-1]
+	if pendingExpired(pending) {
+		http.Error(response, "The registration request was not found.", http.StatusNotFound)
+		return
+	}
 	if !authorizedPending(request, pending) {
+		http.Error(response, "The registration request was not found.", http.StatusNotFound)
+		return
+	}
+	if pendingExpired(pending) {
 		http.Error(response, "The registration request was not found.", http.StatusNotFound)
 		return
 	}
@@ -178,6 +186,10 @@ func authorizedPending(request *http.Request, pending registry.PendingRequest) b
 	nonce := request.Header.Get("X-Tailbridge-Enrollment-Nonce")
 	registrationRequest := protocol.RegistrationRequest{ProjectID: pending.ProjectID, EnvironmentID: pending.EnvironmentID, IdentityKey: pending.IdentityKey, TransportKey: pending.TransportKey}
 	return nonce != "" && hmac.Equal(pending.Proof, enrollment.Proof([]byte(nonce), registrationRequest))
+}
+
+func pendingExpired(pending registry.PendingRequest) bool {
+	return pending.State == "pending" && !pending.ExpiresAt.After(time.Now())
 }
 
 func (s *Server) approve(response http.ResponseWriter, request *http.Request) {

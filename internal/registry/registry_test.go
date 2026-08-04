@@ -84,6 +84,9 @@ func TestRegistrationLifecycle(t *testing.T) {
 	if err := store.CompleteIdentityRotation(ctx, registration.ID, Fingerprint(rotation.IdentityKey), 24*time.Hour); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := store.Renew(ctx, mustRegistration(t, store), pending.IdentityKeyID, []byte("overlap certificate"), "certificate-overlap", now.Add(24*time.Hour), 24*time.Hour); err != nil {
+		t.Fatalf("Renew() with overlap key: %v", err)
+	}
 	renewed, err := store.Renew(ctx, mustRegistration(t, store), Fingerprint(rotation.IdentityKey), []byte("new certificate"), "certificate-two", now.Add(48*time.Hour), 24*time.Hour)
 	if err != nil || !renewed.LeaseExpiresAt.Equal(now.Add(24*time.Hour)) {
 		t.Fatalf("Renew() = %#v, %v", renewed, err)

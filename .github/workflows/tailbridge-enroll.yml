@@ -184,9 +184,10 @@ jobs:
           deadline=$((SECONDS + 600))
           while (( SECONDS < deadline )); do
             nonce=$(cat "$RUNNER_TEMP/tailbridge-enrollment-nonce")
-            state=$(curl --connect-timeout 10 --max-time 30 --fail --silent --header "X-Tailbridge-Enrollment-Nonce: $nonce" "$APPROVAL_URL/v1/pending/$request_id" | jq -er '.state')
-            if [[ "$state" == ready ]]; then
-              exit 0
+            if state=$(curl --connect-timeout 10 --max-time 30 --fail --silent --header "X-Tailbridge-Enrollment-Nonce: $nonce" "$APPROVAL_URL/v1/pending/$request_id" | jq -er '.state'); then
+              if [[ "$state" == ready ]]; then
+                exit 0
+              fi
             fi
             sleep 5
           done

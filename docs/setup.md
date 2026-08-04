@@ -36,6 +36,10 @@ The SST package contains immutable edge and connector digests. Use an exact pack
 
 6. Give the edge tag authority to advertise the selected virtual pool.
 
+7. Create a tagged, preauthorized, non-ephemeral auth key for the edge.
+
+8. Store the key as `TAILSCALE_AUTH_KEY` in the private SST deployment repository.
+
 The default pool is `fd40::/10`. It provides 64 `/16` allocations. Do not use a pool that overlaps Railway's `fd12::/16` prefix or another tailnet route.
 
 The edge tag is configurable. Do not depend on the example tag names in an adopter environment.

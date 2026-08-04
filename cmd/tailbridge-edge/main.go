@@ -88,7 +88,7 @@ func run(ctx context.Context) int {
 				if connector.ProjectID == "" {
 					continue
 				}
-				imports = append(imports, registry.StaticRegistration{ProjectID: connector.ProjectID, EnvironmentID: connector.Environment, EnvironmentName: connector.Environment, ConnectorID: connector.ConnectorID, VirtualPrefix: connector.VirtualPrefix, RealPrefix: connector.RealPrefix})
+				imports = append(imports, registry.StaticRegistration{ProjectID: connector.ProjectID, EnvironmentID: connector.Environment, EnvironmentName: connector.EnvironmentName, ConnectorID: connector.ConnectorID, VirtualPrefix: connector.VirtualPrefix, RealPrefix: connector.RealPrefix})
 			}
 			if err := store.ImportStatic(ctx, imports); err != nil {
 				logger.Error("Tailbridge could not import static registrations.", "error", err)

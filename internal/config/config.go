@@ -89,23 +89,25 @@ type Connector struct {
 }
 
 type ConnectorTarget struct {
-	ConnectorID   string
-	ProjectID     string
-	Environment   string
-	Slot          int
-	VirtualPrefix netip.Prefix
-	RealPrefix    netip.Prefix
-	DNSSuffix     string
+	ConnectorID     string
+	ProjectID       string
+	Environment     string
+	EnvironmentName string
+	Slot            int
+	VirtualPrefix   netip.Prefix
+	RealPrefix      netip.Prefix
+	DNSSuffix       string
 }
 
 type connectorTargetJSON struct {
-	ConnectorID   string `json:"connectorId"`
-	ProjectID     string `json:"projectId,omitempty"`
-	Environment   string `json:"environment"`
-	Slot          int    `json:"slot"`
-	VirtualPrefix string `json:"virtualPrefix"`
-	RealPrefix    string `json:"realPrefix"`
-	DNSSuffix     string `json:"dnsSuffix"`
+	ConnectorID     string `json:"connectorId"`
+	ProjectID       string `json:"projectId,omitempty"`
+	Environment     string `json:"environment"`
+	EnvironmentName string `json:"environmentName,omitempty"`
+	Slot            int    `json:"slot"`
+	VirtualPrefix   string `json:"virtualPrefix"`
+	RealPrefix      string `json:"realPrefix"`
+	DNSSuffix       string `json:"dnsSuffix"`
 }
 
 func LoadEdge() (Edge, error) {
@@ -560,8 +562,12 @@ func connectorTargets(encoded string) ([]ConnectorTarget, error) {
 		seenIDs[value.ConnectorID] = struct{}{}
 		seenSlots[value.Slot] = struct{}{}
 		seenPrefixes[virtualPrefix] = struct{}{}
+		environmentName := value.EnvironmentName
+		if environmentName == "" {
+			environmentName = value.Environment
+		}
 		result = append(result, ConnectorTarget{
-			ConnectorID: value.ConnectorID, ProjectID: value.ProjectID, Environment: value.Environment, Slot: value.Slot,
+			ConnectorID: value.ConnectorID, ProjectID: value.ProjectID, Environment: value.Environment, EnvironmentName: environmentName, Slot: value.Slot,
 			VirtualPrefix: virtualPrefix, RealPrefix: realPrefix, DNSSuffix: suffix,
 		})
 	}

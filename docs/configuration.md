@@ -91,7 +91,19 @@ Dynamic connectors do not use `TB_MTLS_CERT_B64`, `TB_MTLS_KEY_B64`, `TB_VIRTUAL
 
 `TB_OIDC_POLICIES_B64` contains a JSON array. Each item defines one identity provider. The edge treats GitHub as one profile of this generic format.
 
-Required policy fields include `id`, `issuer`, `jwksUrl`, `audiences`, `maxTokenAge`, `projectIdClaim`, and `environmentClaim`. Use `requiredClaims` for exact values. Use `oneOfClaims` for a short overlap list, such as two approved reusable workflow revisions.
+Required policy fields include `id`, `issuer`, `jwksUrl`, `audiences`, `maxTokenAge`, `projectIdClaim`, and `environmentClaim`.
+
+The policy also requires these audit claim mappings:
+
+- `repositoryIdClaim`
+- `workflowRefClaim`
+- `workflowShaClaim`
+- `runIdClaim`
+- `runAttemptClaim`
+
+The GitHub profile maps them to `repository_id`, `job_workflow_ref`, `job_workflow_sha`, `run_id`, and `run_attempt`.
+
+Use `requiredClaims` for exact values. Use `oneOfClaims` for a short list of approved values.
 
 The GitHub profile can bind `projectIdClaim` to `repo_property_tailbridge_railway_project_id`. GitHub prefixes enabled repository custom properties with `repo_property_` in the OIDC token. GitHub currently marks this feature as a public preview. The generic policy format lets an adopter select a different project claim or OIDC provider.
 

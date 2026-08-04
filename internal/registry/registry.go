@@ -548,7 +548,7 @@ func (s *Store) Renew(ctx context.Context, registration Registration, keyID stri
 		return Registration{}, ErrRequestExpired
 	}
 	var active int
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM identity_keys WHERE registration_id = ? AND key_id = ? AND state = 'active')`, registration.ID, keyID).Scan(&active); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM identity_keys WHERE registration_id = ? AND key_id = ? AND (state = 'active' OR (state = 'overlap' AND overlap_until > ?)))`, registration.ID, keyID, now).Scan(&active); err != nil {
 		return Registration{}, fmt.Errorf("check active identity key: %w", err)
 	}
 	if active != 1 {

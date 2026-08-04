@@ -199,6 +199,9 @@ func register(ctx context.Context, cfg config.Connector, identity localIdentity)
 				}
 				continue
 			case "rejected", "frozen":
+				if response.ErrorCode == "rate_limited" || response.ErrorCode == "pending_limit" || response.ErrorCode == "internal_error" {
+					break
+				}
 				identity.RequestID = ""
 				if err := save(filepath.Join(cfg.IdentityDir, "registration.json"), identity); err != nil {
 					return localIdentity{}, err
@@ -210,7 +213,11 @@ func register(ctx context.Context, cfg config.Connector, identity localIdentity)
 				return localIdentity{}, err
 			}
 		}
-		timer := time.NewTimer(delay)
+		retryDelay := delay
+		if responseRetry := time.Duration(response.RetryAfterMS) * time.Millisecond; responseRetry > retryDelay && responseRetry <= 30*time.Second {
+			retryDelay = responseRetry
+		}
+		timer := time.NewTimer(retryDelay)
 		select {
 		case <-ctx.Done():
 			timer.Stop()

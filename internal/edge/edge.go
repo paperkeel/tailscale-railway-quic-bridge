@@ -178,7 +178,7 @@ func (s *Server) refreshDynamic(ctx context.Context) error {
 		activeKeys[key] = struct{}{}
 		virtualBytes := registration.VirtualPrefix.Addr().As16()
 		baseBytes := s.config.VirtualNetwork.Addr().As16()
-		target := config.ConnectorTarget{ConnectorID: key, Environment: registration.EnvironmentID, Slot: int(virtualBytes[1] - baseBytes[1]), VirtualPrefix: registration.VirtualPrefix, RealPrefix: registration.RealPrefix, DNSSuffix: registration.ProjectAlias + "." + registration.EnvironmentAlias + ".railway.internal"}
+		target := config.ConnectorTarget{ConnectorID: key, Environment: registration.EnvironmentID, EnvironmentName: registration.EnvironmentName, Slot: int(virtualBytes[1] - baseBytes[1]), VirtualPrefix: registration.VirtualPrefix, RealPrefix: registration.RealPrefix, DNSSuffix: registration.ProjectAlias + "." + registration.EnvironmentAlias + ".railway.internal"}
 		entry := s.registry[key]
 		if entry == nil || entry.target != target {
 			if entry != nil {

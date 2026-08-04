@@ -14,6 +14,7 @@ export interface EdgeConnectorConfig {
 	connectorId: string;
 	projectId: pulumi.Input<string>;
 	environment: pulumi.Input<string>;
+	environmentName: pulumi.Input<string>;
 	slot: number;
 	virtualPrefix: string;
 	realPrefix: string;

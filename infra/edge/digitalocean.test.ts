@@ -65,6 +65,7 @@ beforeAll(async () => {
 					connectorId: "api",
 					projectId: "project-id",
 					environment: "test",
+					environmentName: "test",
 					slot: 0,
 					virtualPrefix: "fd20::/16",
 					realPrefix: "fd12::/16",
