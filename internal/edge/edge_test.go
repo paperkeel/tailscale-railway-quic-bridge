@@ -759,7 +759,12 @@ func TestAuthenticateAcceptsNarrowerRoute(t *testing.T) {
 	if accepted.MaxTCPFlows != 1 {
 		t.Fatalf("got TCP flow limit %d", accepted.MaxTCPFlows)
 	}
+	deadline := time.Now().Add(time.Second)
 	active := server.session.Load()
+	for active == nil && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+		active = server.session.Load()
+	}
 	if active == nil || active.id != accepted.SessionID {
 		t.Fatal("the server did not store the accepted session")
 	}
