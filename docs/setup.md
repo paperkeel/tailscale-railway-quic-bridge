@@ -1,565 +1,298 @@
-# Deploy a shared Tailbridge edge
+# Deploy Tailbridge
 
-This procedure deploys one shared Tailbridge edge for one through 32 Railway environments.
+This procedure deploys one shared Tailbridge edge. Separate private repositories deploy Railway connectors as third-party users do.
 
-Each Railway environment uses one connector slot. Keep each slot stable after the first deployment.
+Do not deploy infrastructure from the Tailbridge source repository.
 
-## Choose a deployment method
+## Choose artifact channels
 
-Use the GitHub template for a standard deployment. You do not need to fork the Tailbridge source repository.
+Use the `stable` connector image tag for the standard Railway template:
 
-The template keeps your infrastructure configuration separate from the Tailbridge source. It also polls for tested `master` artifacts.
+```text
+ghcr.io/bearfire-dev/tailscale-railway-quic-bridge-connector:stable
+```
 
-Import the `Tailbridge` SST component only when you need custom infrastructure code.
+Railway can follow a changed digest for this tag during a maintenance window. Use the `master` tag only for an explicit canary. A merge to the Tailbridge `master` branch updates that tag.
 
-## Prerequisites
+Use a `sha-FULL_COMMIT_SHA` tag or an image digest for rollback.
 
-For a template deployment, you need these accounts and credentials:
+The SST package contains immutable edge and connector digests. Use an exact package version in a production deployment repository.
 
-- A GitHub account that can create a repository from a public template.
-- A Cloudflare account with R2 enabled.
-- A Cloudflare API token that can manage R2 state.
-- A DigitalOcean API token that can manage droplets, firewalls, volumes, and SSH keys.
-- A Railway token that can manage projects, environments, services, variables, and deployments.
-- A Tailscale account that can change the tailnet policy.
-- A tagged, preauthorized, non-ephemeral Tailscale auth key.
-- A GitHub classic personal access token with the `read:packages` scope.
+## Prepare Tailscale
 
-Authorize the GitHub token for organization single sign-on when the organization requires authorization.
+1. Choose one tag for the edge and one tag for CI.
 
-For local or advanced use, you also need Node.js 22 or later and pnpm 10.34.5.
+   Example values are `tag:tailbridge` and `tag:tailbridge-ci`.
 
-This procedure does not include Node.js or pnpm installation steps.
+2. Create a Tailscale workload identity for GitHub Actions.
 
-## Create the deployment repository
+3. Give the identity the `auth_keys` scope and the CI tag.
 
-1. Open the [Tailbridge SST template](https://github.com/bearfire-dev/tailbridge-sst-template).
+4. Store its client ID and audience as organization variables named `TS_OAUTH_CLIENT_ID` and `TS_AUDIENCE`.
 
-2. Select **Use this template**.
+   These values are not signing credentials.
 
-3. Create a repository in your GitHub account or organization.
+5. Give the CI tag access to the edge approval port.
 
-4. Keep the default branch protection and Actions permissions required by your organization.
+6. Give the edge tag authority to advertise the selected virtual pool.
 
-Do not create a fork of the Tailbridge source repository. A fork mixes infrastructure state with upstream source changes.
+The default pool is `fd40::/10`. It provides 64 `/16` allocations. Do not use a pool that overlaps Railway's `fd12::/16` prefix or another tailnet route.
 
-## Configure GitHub Packages access
+The edge tag is configurable. Do not depend on the example tag names in an adopter environment.
 
-The template installs `@bearfire-dev/tailscale-railway-quic-bridge` from `https://npm.pkg.github.com`.
+## Prepare an OIDC profile
 
-1. Create a classic personal access token with the `read:packages` scope.
+Tailbridge uses generic OIDC policies. GitHub is the standard profile.
 
-2. Grant the token access to the `bearfire-dev` package when GitHub requests package authorization.
+1. Create the organization repository property `tailbridge_railway_project_id`.
 
-3. Open the deployment repository settings.
+2. Set the property to the Railway project ID on each deployment repository.
 
-4. Open **Environments**, and then open the `production` environment.
+3. Include that custom property in GitHub Actions OIDC tokens.
 
-5. Add the token as the `GH_PACKAGES_TOKEN` environment secret.
+   GitHub emits it as `repo_property_tailbridge_railway_project_id`.
 
-Do not commit this token to `.npmrc`, `package.json`, or another repository file.
+   GitHub currently marks [repository custom properties in OIDC tokens](https://docs.github.com/en/actions/reference/security/oidc#including-repository-custom-properties-in-oidc-tokens) as a public preview. Review that status before you make this profile a production dependency. Use a different configured claim or identity provider if your GitHub plan does not provide the feature.
 
-## Configure deployment secrets
+4. Require every deployment job to use a GitHub environment.
 
-Add these secrets to the GitHub `production` environment:
+5. Use the Railway environment name as the GitHub environment name.
 
-| Secret | Purpose |
-|---|---|
-| `CLOUDFLARE_API_TOKEN` | Reads and writes encrypted SST state in Cloudflare R2. |
-| `DIGITALOCEAN_TOKEN` | Manages the shared edge resources. |
-| `RAILWAY_TOKEN` | Manages connector services and Railway settings. |
-| `TAILSCALE_AUTH_KEY` | Registers the shared edge in the tailnet. |
-| `GH_PACKAGES_TOKEN` | Reads the public GitHub Packages component. |
+   GitHub creates a referenced environment when it does not exist. Apply organization rules that are suitable for preview environments.
 
-Keep all secret values outside repository files and workflow logs.
+6. Pin the reusable Tailbridge workflow by a full commit SHA.
 
-The workflow passes `TAILSCALE_AUTH_KEY` to SST through standard input. It does not write the value to a file.
+7. Keep two approved workflow references during a workflow update. Remove the old reference after all callers use the new one.
 
-An ephemeral Tailscale auth key cannot restore a stable edge identity after state loss.
-
-## Define the shared edge
-
-Add these variables to the GitHub `production` environment:
-
-| Variable | Required | Default | Purpose |
-|---|---:|---|---|
-| `CLOUDFLARE_ACCOUNT_ID` | Yes | None | Selects the Cloudflare account for SST state. |
-| `TAILBRIDGE_EDGE_ID` | No | `production` | Gives the shared edge a stable deployment identity. |
-| `TAILBRIDGE_CONNECTORS_JSON` | Yes | None | Defines one through 32 Railway connectors. |
-| `EDGE_SSH_SOURCE_CIDRS` | Yes | None | Allows administrative SSH source networks. |
-| `DIGITALOCEAN_REGION` | No | `nyc3` | Selects the shared edge region. |
-| `DIGITALOCEAN_SIZE` | No | `s-1vcpu-1gb` | Selects the shared edge droplet size. |
-| `TAILBRIDGE_VIRTUAL_NETWORK` | No | `fd20::/11` | Contains the 32 virtual connector networks. |
-
-Use a stable value such as `production` for `TAILBRIDGE_EDGE_ID`.
-
-Do not change `TAILBRIDGE_EDGE_ID` after the first deployment. A change creates a different component identity.
-
-Separate multiple values in `EDGE_SSH_SOURCE_CIDRS` with commas.
-
-The workflow also adds its runner IPv4 address as a `/32` for that run.
-
-## Define connector slots
-
-Set `TAILBRIDGE_CONNECTORS_JSON` to a JSON array. Each item has these fields:
-
-| Field | Required | Value |
-|---|---:|---|
-| `name` | Yes | Stable project name and DNS label. |
-| `slot` | Yes | Unique integer from `0` through `31`. |
-| `projectId` | Yes | Existing Railway project ID. |
-| `environmentId` | Yes | Existing Railway environment ID. |
-| `region` | No | Railway region for this connector. |
-| `realPrefix` | No | Railway IPv6 prefix. The default is `fd12::/16`. |
-
-For example:
+Use a policy in this form. Replace every example value:
 
 ```json
 [
   {
-    "name": "billing",
-    "slot": 0,
-    "projectId": "replace-me",
-    "environmentId": "replace-me",
-    "region": "us-west2",
-    "realPrefix": "fd12::/16"
-  },
-  {
-    "name": "analytics",
-    "slot": 1,
-    "projectId": "replace-me",
-    "environmentId": "replace-me"
+    "id": "github",
+    "issuer": "https://token.actions.githubusercontent.com",
+    "jwksUrl": "https://token.actions.githubusercontent.com/.well-known/jwks",
+    "audiences": ["tailbridge-enrollment"],
+    "algorithms": ["RS256"],
+    "maxTokenAge": "5m",
+    "requiredClaims": {
+      "repository_owner_id": "REPLACE_WITH_ORGANIZATION_ID"
+    },
+    "oneOfClaims": {
+      "job_workflow_ref": [
+        "bearfire-dev/tailscale-railway-quic-bridge/.github/workflows/tailbridge-enroll.yml@FULL_COMMIT_SHA"
+      ]
+    },
+    "projectIdClaim": "repo_property_tailbridge_railway_project_id",
+    "environmentClaim": "environment",
+    "replayClaim": "jti",
+    "repositoryIdClaim": "repository_id",
+    "repositoryClaim": "repository",
+    "workflowRefClaim": "job_workflow_ref",
+    "workflowShaClaim": "job_workflow_sha",
+    "runIdClaim": "run_id",
+    "runAttemptClaim": "run_attempt"
   }
 ]
 ```
 
-Each slot maps to one virtual `/16` inside `fd20::/11`.
+The edge validates `exp`, `nbf`, `iat`, `jti`, the issuer, the audience, and all configured binding claims. It records the repository and workflow-run claims as audit data.
 
-| Slot | Virtual prefix | Virtual Railway resolver |
-|---:|---|---|
-| `0` | `fd20::/16` | `fd20::10` |
-| `1` | `fd21::/16` | `fd21::10` |
-| `31` | `fd3f::/16` | `fd3f::10` |
+## Deploy the edge from a private SST repository
 
-Keep a project in the same slot during updates. A slot change changes every virtual address for that project.
+1. Create a private infrastructure repository.
 
-Each connector translates its virtual prefix to `realPrefix`. This translation lets many Railway projects use the same real prefix.
+2. Configure the `@bearfire-dev` GitHub Packages registry.
 
-## Configure Cloudflare R2 state
-
-The template uses Cloudflare R2 as the SST home. SST encrypts secret values in the state.
-
-Use the `production` stage for the standard workflow. Keep the same Cloudflare account, edge ID, app name, and stage.
-
-Back up the R2 state according to your recovery policy. State loss can cause SST to propose duplicate resources.
-
-An advanced SST app can use `SST_HOME=local`. Use local state only for a disposable test.
-
-## Run the first deployment
-
-1. Open the **Actions** tab in the deployment repository.
-
-2. Select the **Tailbridge deployment** workflow.
-
-3. Start a manual workflow run with an empty `package_version` input.
-
-4. Confirm that the workflow resolves the `master` package tag to an exact package version.
-
-5. Confirm that the workflow installs the exact package version without changing the repository lockfile.
-
-6. Confirm that the type check and tests pass.
-
-7. Review the SST diff in the workflow log.
-
-8. Confirm that the diff uses the intended Cloudflare, DigitalOcean, Railway, and Tailscale accounts.
-
-9. Confirm that the diff creates one shared edge and the configured connector services.
-
-10. Confirm that the diff does not replace an existing DigitalOcean volume.
-
-11. Let the workflow deploy the `production` stage.
-
-The workflow creates the edge before it activates the connector services.
-
-The edge uses one stable Tailscale identity. Each Railway connector opens an outbound QUIC session to the edge public IPv4 address.
-
-The workflow stores the exact package version as the SST `artifactVersion` output.
-
-The installed package metadata pins the matching edge and connector image digest pair.
-
-## Configure the tailnet
-
-1. Copy the generated policy fragment from the workflow output.
-
-2. Merge the policy fragment into the tailnet policy.
-
-3. Add narrow grants for the required users, virtual destinations, and ports.
-
-4. Approve each assigned virtual `/16` when the policy does not approve routes automatically.
-
-   For example, approve `fd20::/16` for slot `0` and `fd21::/16` for slot `1`.
-
-   Do not approve the complete `fd20::/11` range.
-
-5. Configure one split DNS entry for each connector.
-
-For slot `0` with the name `billing`, use this entry:
-
-```text
-Domain: billing.railway.internal
-Nameserver: fd20::10
-```
-
-For slot `1` with the name `analytics`, use this entry:
-
-```text
-Domain: analytics.railway.internal
-Nameserver: fd21::10
-```
-
-6. Make each client accept subnet routes when its platform requires this setting.
-
-The connector removes the project label before it sends the query to Railway DNS.
-
-The connector returns only AAAA records. It translates each returned address into the connector virtual prefix.
-
-Tailbridge supports UDP and TCP DNS queries.
-
-## Verify the first deployment
-
-1. Record the shared edge addresses, connector outputs, deployed artifacts, and status commands.
-
-2. Run the edge status command from the workflow output.
-
-3. Confirm that the edge reports all configured connector slots as ready.
-
-4. Confirm that Tailscale shows the expected shared edge hostname and virtual route.
-
-5. Run `tailscale ping` from an approved client to the shared edge.
-
-6. Confirm that the result shows a direct path to the edge public IPv4 address.
-
-7. Resolve a project-qualified Railway hostname from the approved client.
-
-8. Confirm that the result contains only virtual AAAA addresses from the correct slot.
-
-9. Connect to an approved Railway TCP service.
-
-10. Test an approved Railway UDP service when the project uses UDP.
-
-11. Confirm that another project slot cannot access an unapproved destination.
-
-For example:
-
-```bash
-dig AAAA api.billing.railway.internal
-curl http://api.billing.railway.internal:3000
-```
-
-## Poll for Tailbridge updates
-
-The **Tailbridge deployment** workflow runs every hour at minute `17`.
-
-It also runs after manual requests and selected configuration changes on `master`.
-
-The push paths include `infra/**`, `sst.config.ts`, `package.json`, and `pnpm-lock.yaml`.
-
-Each scheduled run resolves the `master` package tag to an exact immutable version.
-
-The workflow compares that exact version with the SST `artifactVersion` output.
-
-During a scheduled run, the workflow stops when `artifactVersion` matches the resolved version.
-
-Push and manual runs deploy even when the artifact version matches.
-
-If the artifacts changed, the workflow creates a temporary dependency update. It does not commit the update.
-
-The workflow then runs the type check, tests, SST diff, and production deployment.
-
-Review scheduled deployment failures in GitHub Actions. Do not ignore a failed diff, test, or readiness check.
-
-## Roll back an update
-
-1. Find the last working exact package version in a successful workflow run.
-
-2. Start a manual **Tailbridge deployment** workflow.
-
-3. Enter the exact package version in `package_version`.
-
-   Use the `0.0.0-sha.FULL_COMMIT_SHA` format.
-
-4. Confirm that the workflow resolves the matching immutable image digest pair.
-
-5. Review the SST diff.
-
-6. Confirm that the diff keeps the existing edge volume and connector slots.
-
-7. Deploy the previous package version.
-
-8. Repeat the verification procedure.
-
-Do not remove the SST stage to roll back an update.
-
-The next hourly poll can replace the rollback when `master` points to a newer version.
-
-Disable the scheduled workflow when you must keep the rollback version.
-
-The old Railway connector deployment drains for 15 seconds after the replacement becomes ready.
-
-An edge update causes a short outage. The persistent volume keeps the Tailscale machine identity.
-
-## Change Railway projects
-
-1. Edit `TAILBRIDGE_CONNECTORS_JSON` in the deployment repository settings.
-
-2. Keep every existing project in its current slot.
-
-3. Assign each new project an unused slot from `0` through `31`.
-
-4. Start a manual deployment workflow.
-
-5. Review all connector additions, updates, and removals in the SST diff.
-
-6. Deploy the project change.
-
-7. Update the tailnet grants and split DNS entries.
-
-8. Verify every changed project.
-
-If you remove an item, SST removes the managed connector service.
-
-SST does not remove the referenced Railway project or environment.
-
-Change `realPrefix` only when Railway changes the real project network. This change can interrupt active flows.
-
-## Import the component into another SST app
-
-Use this method only when the template cannot express your infrastructure requirements.
-
-1. Configure the GitHub Packages registry for the `@bearfire-dev` scope.
-
-2. Set `NODE_AUTH_TOKEN` to a classic GitHub token with the `read:packages` scope.
-
-3. Add the component package to the SST project:
+3. Install an exact Tailbridge package version:
 
    ```bash
-   pnpm add @bearfire-dev/tailscale-railway-quic-bridge
+   pnpm add @bearfire-dev/tailscale-railway-quic-bridge@0.0.0-sha.FULL_COMMIT_SHA
    ```
 
-4. Import and create the component in `sst.config.ts`:
+4. Define the edge in `sst.config.ts`:
 
    ```typescript
-   import { Tailbridge } from '@bearfire-dev/tailscale-railway-quic-bridge';
+   import { Tailbridge } from "@bearfire-dev/tailscale-railway-quic-bridge";
 
-   const deployment = new Tailbridge('Tailbridge', {
+   const tailbridge = new Tailbridge("Tailbridge", {
      stage: $app.stage,
-     edgeId: 'production',
-     virtualNetwork: 'fd20::/11',
+     edgeId: "production",
      edge: {
-       provider: 'digitalocean',
-       region: 'nyc3',
-       size: 's-1vcpu-1gb',
-       sshSourceCidrs: ['203.0.113.10/32'],
+       provider: "digitalocean",
+       region: "nyc3",
+       size: "s-1vcpu-1gb",
+       sshSourceCidrs: ["192.0.2.0/24"],
      },
-     connectors: [
-       {
-         name: 'billing',
-         slot: 0,
-         projectId: 'replace-me',
-         environmentId: 'replace-me',
-         region: 'us-west2',
+     registration: {
+       frozen: false,
+       newProjectsFrozen: true,
+       allowedProjectIds: ["REPLACE_WITH_FIRST_PROJECT_ID"],
+       virtualNetwork: "fd40::/10",
+       excludedPrefixes: ["fd12::/16"],
+       oidcPolicies: OIDC_POLICIES,
+       approvalTailscaleTags: ["tag:tailbridge-ci"],
+       edgeTailscaleTag: "tag:tailbridge",
+       leases: {
+         preview: "24h",
+         persistent: "720h",
+         quarantine: "24h",
        },
-     ],
-     tailscaleAuthKey: new sst.Secret('TailscaleAuthKey').value,
+     },
+     tailscaleAuthKey: TAILSCALE_AUTH_KEY,
    });
    ```
 
-5. Keep the component name, app name, edge ID, and stage stable after the first deployment.
+5. Keep `connectors` only while you migrate existing static connectors. Remove it after all active identities exist in SQLite.
 
-The component manages the edge, connector services, certificates, and deployment artifact marker. It also produces the tailnet policy data.
+6. Review the SST diff.
 
-## Migrate an existing deployment
+7. Confirm that the DigitalOcean volume has `retainOnDelete` protection.
 
-Do not let SST create replacements for a working edge or persistent volume.
+8. Confirm that the edge container has separate mounts for Tailscale state and the SQLite registry.
 
-1. Back up the current SST state and DigitalOcean volume.
+9. Deploy from the private repository.
 
-2. Record all DigitalOcean, Railway, and Tailscale resource IDs.
+The dynamic route reconciler is the only writer for advertised routes. Do not add `--advertise-routes` to `TS_EXTRA_ARGS`.
 
-3. Create the template repository and configure the same provider accounts.
+Back up the DigitalOcean volume with a separate snapshot or backup policy. `retainOnDelete` prevents an SST delete from removing the volume. It is not a backup.
 
-4. Assign the existing Railway environment a stable connector slot.
+## Configure the Railway connector template
 
-5. Add an `import` option to each existing provider resource in a custom component copy.
+Create the template in the Railway workspace that will own the connectors.
 
-   ```typescript
-   new digitalocean.Droplet('Edge', args, {
-     import: 'existing-droplet-id',
-   });
+1. Use this public image by default:
+
+   ```text
+   ghcr.io/bearfire-dev/tailscale-railway-quic-bridge-connector:stable
    ```
 
-6. Add the correct provider ID to each resource `import` option.
+2. Enable image updates for a changed `stable` digest.
 
-7. Run the SST diff.
+3. Set one replica.
 
-8. Confirm that the diff preserves the edge host, volume, Tailscale identity, and Railway services.
+4. Attach one volume at `/var/lib/tailbridge`.
 
-9. Stop the previous deployment system from managing the imported resources.
+5. Set `RAILWAY_RUN_UID=65532` so the unprivileged connector can use the volume.
 
-10. Deploy the imported component.
+6. Set the health path to `/readyz`.
 
-11. Add the new virtual route and project-qualified DNS entry.
+7. Set the health timeout to at least 30 minutes for the first enrollment.
 
-12. Verify the virtual service addresses.
+8. Use the `ALWAYS` restart policy.
 
-13. Remove the old direct Railway route after clients use the virtual route.
+9. Set a 15-second drain period.
 
-Resource types and provider import IDs depend on the source deployment.
+10. Disable deployment overlap. Railway cannot mount one volume on two deployments at the same time.
 
-The published component does not expose resource import options. Use a custom component copy for this migration.
+11. Set these non-secret variables:
 
-Remove each `import` option after SST records the resource in the `production` stage.
+    ```text
+    TB_REGISTRATION_MODE=dynamic
+    TB_IDENTITY_DIR=/var/lib/tailbridge
+    TB_EDGE_ID=REPLACE_WITH_EDGE_ID
+    TB_EDGE_ENDPOINT=REPLACE_WITH_EDGE_IP:4433
+    TB_REGISTRATION_ENDPOINT=REPLACE_WITH_EDGE_IP:4434
+    TB_TRUST_BUNDLE_B64=REPLACE_WITH_PUBLIC_ROOT_BUNDLE
+    ```
 
-Do not import a resource that another deployment system still manages.
+Do not put Railway project IDs in template secrets. The connector reads Railway system variables at runtime.
 
-## Recover a failed workflow
+Do not add static certificate, virtual-prefix, DNS-suffix, or lease-class variables to this template.
 
-1. Keep the failed SST stage and its R2 state.
+## Enroll a connector from its private project repository
 
-2. Correct the reported secret, variable, package, or provider error.
+1. Create the connector service from the Railway template.
 
-3. Start the deployment workflow again.
+2. Add `RAILWAY_TOKEN` as a repository or environment secret.
 
-4. Review the remaining SST changes.
+3. Call `.github/workflows/tailbridge-enroll.yml` from this repository by a full commit SHA.
 
-5. Deploy the stage.
+4. Pass the Railway project ID, environment ID, environment name, connector service ID, DNS aliases, edge endpoints, approval URL, and trust bundle.
 
-SST resumes from its stored state. The DigitalOcean volume keeps the edge identity when the volume remains available.
+5. Pass `RAILWAY_TOKEN` as the reusable workflow secret `railway-token`.
 
-If the workflow package update fails, use the last working exact package version in a manual run.
+The reusable workflow performs these actions:
 
-If the R2 state is lost, restore the state before another deployment.
+1. It creates a random enrollment nonce.
 
-Do not deploy with empty state over existing cloud resources.
+2. It writes the nonce and connector variables through the Railway control plane.
 
-If SST retained the volume, import it before you deploy a replacement component.
+3. It redeploys the connector.
 
-If the volume is lost, store a new non-ephemeral Tailscale auth key. Validate the new machine before you remove the old machine.
+4. It joins the tailnet with Tailscale workload identity federation.
 
-## Remove Tailbridge
+5. It finds the pending registration.
 
-This action removes managed cloud resources. SST retains the DigitalOcean identity volume.
+6. It requests a GitHub OIDC token for `tailbridge-enrollment`.
 
-1. Stop scheduled deployment workflows.
+7. It submits the nonce, fingerprint, and OIDC token to the tailnet-only approval API.
 
-2. Record the resource IDs and Tailscale machine ID.
+8. It waits for the connector session and route generation to become ready through the tailnet-only approval API.
 
-3. Clone the deployment repository to an authenticated workstation.
+The edge approves only an HMAC that uses the Railway-delivered nonce. Public project and environment IDs are not enough to claim an identity.
 
-4. Export the same provider credentials and deployment variables.
+## Configure split DNS
 
-5. Set `NODE_AUTH_TOKEN` to the GitHub Packages token.
+Create one Tailscale split-DNS entry:
 
-6. Install the locked dependencies:
+```text
+Domain: railway.internal
+Nameserver: REPLACE_WITH_EDGE_TAILSCALE_IP
+```
 
-   ```bash
-   pnpm install --frozen-lockfile
-   ```
+Use approved aliases in this name form:
 
-7. Export and back up the SST state:
+```text
+service.project-alias.environment-alias.railway.internal
+```
 
-   ```bash
-   pnpm sst state export --stage production > tailbridge-production-state.json
-   ```
+The resolver returns `NXDOMAIN` for an unknown alias. It returns `SERVFAIL` when the connector is temporarily unavailable.
 
-   Treat the exported state as a secret.
+## Handle previews
 
-8. Confirm the ownership of every imported or external resource.
+Use the Railway preview environment name as the GitHub environment name.
 
-9. Remove the route approval, grants, and split DNS entries.
+A preview registration has a 24-hour lease unless its environment name is in `TB_PERSISTENT_ENVIRONMENTS`.
 
-10. Remove the `production` stage:
+Call the reusable workflow with `operation: revoke` when a preview closes. Revocation withdraws the route, rejects new sessions, and starts the quarantine period.
 
-   ```bash
-   pnpm sst remove --stage production
-   ```
+If cleanup does not run, lease expiry withdraws the route automatically.
 
-11. Confirm that SST removed only resources that the component owns.
+## Operate the freeze controls
 
-12. Confirm that Railway retains each referenced project and environment.
+Set `registration.frozen` to `true` to block all new requests and approvals.
 
-13. Remove the offline shared edge machine from Tailscale.
+Set `registration.newProjectsFrozen` to `true` to block unknown projects while you continue to create environments for known projects.
 
-14. Keep the DigitalOcean volume until the identity recovery period ends.
+Use `allowedProjectIds` for an explicit first-project rollout.
 
-15. Delete the retained volume only when you intend to discard the identity.
+Change these values only through an SST deployment. Tailbridge has no public freeze-control endpoint.
 
-16. Remove the production environment secrets when no deployment uses them.
+Existing data sessions and known-identity certificate renewals continue during a freeze.
 
-## Common errors
+## Revoke and recover
 
-### GitHub Packages returns `401` or `403`
+Use the reusable cleanup operation for normal preview removal.
 
-Confirm that `GH_PACKAGES_TOKEN` contains a classic token with `read:packages`.
+A revoked route stays in quarantine for 24 hours by default. Tailbridge does not assign that prefix to another project during quarantine.
 
-Authorize the token for organization single sign-on when GitHub requires authorization.
+If a connector loses its volume, revoke the old registration and complete a new enrollment. Do not treat volume loss as an in-place key rotation because the old key cannot prove the new key.
 
-### A required secret or variable is empty
+Restore the DigitalOcean volume before you restore the edge. The volume contains the Tailscale machine identity, connector registry, leases, allocations, and certificate records.
 
-Compare the repository settings with the names in this procedure. GitHub secret and variable names are case-sensitive.
+## Roll back
 
-### `TAILBRIDGE_CONNECTORS_JSON` is not valid
+1. Select the last working exact SST package version.
 
-Validate the value as a JSON array. Remove comments and trailing commas.
+2. Select its matching image digests or `sha-FULL_COMMIT_SHA` tags.
 
-Confirm that each item has a name, slot, project ID, and environment ID.
+3. Review the SST diff.
 
-### A connector slot is outside the valid range
+4. Confirm that the diff keeps the DigitalOcean volume and reserved IP.
 
-Use one unique integer from `0` through `31` for each connector.
+5. Deploy from the private infrastructure repository.
 
-### Two connectors use the same slot or name
+6. Verify route reconciliation, DNS, TCP, UDP, certificate renewal, and revocation.
 
-Assign a unique stable name and slot to each connector.
-
-### The scheduled workflow does not deploy
-
-Check the resolved package version and the SST `artifactVersion` output.
-
-The workflow correctly stops when the exact package version did not change.
-
-The exact package version pins the same edge and connector image digest pair.
-
-### SST proposes a new edge
-
-Stop the deployment. Confirm the app name, stage, `TAILBRIDGE_EDGE_ID`, Cloudflare account, and R2 state.
-
-### SST reports a state lock
-
-Confirm that no other workflow or local deployment still runs.
-
-Use the SST unlock command only after the first deployment stops.
-
-### The workflow cannot connect to the edge through SSH
-
-Confirm that the workflow added its current runner IPv4 address as a `/32`.
-
-Confirm that the DigitalOcean firewall also contains the approved administrative CIDRs.
-
-### A connector does not become ready
-
-Confirm the Railway token, project ID, environment ID, region, and connector service logs.
-
-Confirm that Railway can send outbound IPv4 UDP traffic to edge port `4433`.
-
-### A project hostname does not resolve
-
-Confirm that the split DNS suffix contains the connector name.
-
-Confirm that the nameserver is the virtual resolver address for the connector slot.
-
-### A virtual address does not accept traffic
-
-Confirm that the client accepts subnet routes. Confirm that the tailnet grant permits the virtual destination and port.
-
-Confirm that the Railway service listens on its private IPv6 address. Confirm that `realPrefix` contains that address.
+Do not use the mutable `master` image tag for rollback.

@@ -1,9 +1,6 @@
 import { isIP } from "node:net";
 
-import type {
-	TailbridgeArgs,
-	TailbridgeConnectorTarget,
-} from "./tailbridge";
+import type { TailbridgeArgs, TailbridgeConnectorTarget } from "./tailbridge";
 
 export type SSTHome = "cloudflare" | "local";
 
@@ -15,7 +12,8 @@ export interface NormalizedConnectorTarget extends TailbridgeConnectorTarget {
 	nameserver: string;
 }
 
-export interface NormalizedTailbridgeArgs extends Omit<TailbridgeArgs, "connectors"> {
+export interface NormalizedTailbridgeArgs
+	extends Omit<TailbridgeArgs, "connectors"> {
 	virtualNetwork: string;
 	connectors: NormalizedConnectorTarget[];
 }
@@ -50,20 +48,38 @@ export function normalizeTailbridgeArgs(
 	for (const cidr of args.edge.sshSourceCidrs) {
 		validateCidr("edge.sshSourceCidrs", cidr);
 	}
-	if (args.connectors.length === 0 || args.connectors.length > 32) {
+	const connectors = args.connectors ?? [];
+	if (!args.registration && connectors.length === 0) {
+		throw new Error(
+			"connectors must contain at least one target when registration is not configured.",
+		);
+	}
+	if (connectors.length > 32) {
 		throw new Error("connectors must contain between 1 and 32 targets.");
 	}
 
-	const requestedVirtualNetwork = args.virtualNetwork ?? defaultVirtualNetwork;
+	const requestedVirtualNetwork =
+		args.registration?.virtualNetwork ??
+		args.virtualNetwork ??
+		(args.registration ? "fd40::/10" : defaultVirtualNetwork);
+	if (args.registration) {
+		validateDynamicNetwork(
+			requestedVirtualNetwork,
+			args.registration.excludedPrefixes ?? [defaultRealPrefix],
+		);
+	}
+	const networkLength = args.registration
+		? Number(requestedVirtualNetwork.split("/")[1])
+		: 11;
 	const virtualBase = parseIpv6Prefix(
 		requestedVirtualNetwork,
-		11,
+		networkLength,
 		"virtualNetwork",
 	);
-	const virtualNetwork = formatIpv6Prefix(virtualBase, 11);
+	const virtualNetwork = formatIpv6Prefix(virtualBase, networkLength);
 	const names = new Set<string>();
 	const slots = new Set<number>();
-	const connectors = args.connectors.map((target) => {
+	const normalizedConnectors = connectors.map((target) => {
 		validateTarget(target);
 		if (names.has(target.name)) {
 			throw new Error(`connector name ${target.name} must be unique.`);
@@ -90,13 +106,44 @@ export function normalizeTailbridgeArgs(
 		};
 	});
 
-	return { ...args, virtualNetwork, connectors };
+	return { ...args, virtualNetwork, connectors: normalizedConnectors };
+}
+
+function validateDynamicNetwork(value: string, exclusions: string[]): void {
+	const length = Number(value.split("/")[1]);
+	if (!Number.isInteger(length) || length < 10 || length > 16) {
+		throw new Error(
+			"registration.virtualNetwork must use a prefix from /10 through /16.",
+		);
+	}
+	const base = parseIpv6Prefix(value, length, "registration.virtualNetwork");
+	const ula = parseIpv6Prefix("fd00::/8", 8, "ULA network");
+	if (base >> 120n !== ula >> 120n) {
+		throw new Error("registration.virtualNetwork must be inside fd00::/8.");
+	}
+	for (const exclusion of exclusions) {
+		const excludedLength = Number(exclusion.split("/")[1]);
+		const excludedBase = parseIpv6Prefix(
+			exclusion,
+			excludedLength,
+			"registration.excludedPrefixes",
+		);
+		const shorter = Math.min(length, excludedLength);
+		const shift = 128n - BigInt(shorter);
+		if (base >> shift === excludedBase >> shift) {
+			throw new Error(
+				`registration.virtualNetwork overlaps excluded prefix ${exclusion}.`,
+			);
+		}
+	}
 }
 
 function validateTarget(target: TailbridgeConnectorTarget): void {
 	validateName("connector name", target.name);
 	if (!Number.isInteger(target.slot) || target.slot < 0 || target.slot > 31) {
-		throw new Error(`connector ${target.name} slot must be an integer from 0 to 31.`);
+		throw new Error(
+			`connector ${target.name} slot must be an integer from 0 to 31.`,
+		);
 	}
 	if (target.region !== undefined && !target.region.trim()) {
 		throw new Error(`connector ${target.name} region must not be empty.`);
@@ -147,7 +194,11 @@ function expandIpv6(address: string): string[] {
 	const leftGroups = left ? left.split(":") : [];
 	const rightGroups = right ? right.split(":") : [];
 	const missing = 8 - leftGroups.length - rightGroups.length;
-	return [...leftGroups, ...Array.from({ length: missing }, () => "0"), ...rightGroups];
+	return [
+		...leftGroups,
+		...Array.from({ length: missing }, () => "0"),
+		...rightGroups,
+	];
 }
 
 function formatIpv6Prefix(value: bigint, length: number): string {

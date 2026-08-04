@@ -1,7 +1,8 @@
 import * as pulumi from "@pulumi/pulumi";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { Tailbridge } from "./tailbridge";
+import { normalizeTailbridgeArgs } from "./config";
 
 const resources: pulumi.runtime.MockResourceArgs[] = [];
 
@@ -16,6 +17,9 @@ beforeAll(() => {
 						ipv4Address: "203.0.113.10",
 						ipv6Address: "2001:db8::10",
 					});
+				}
+				if (args.type === "digitalocean:index/reservedIp:ReservedIp") {
+					Object.assign(state, { ipAddress: "203.0.113.10" });
 				}
 				if (args.type === "digitalocean:index/sshKey:SshKey") {
 					Object.assign(state, { fingerprint: "test-fingerprint" });
@@ -48,32 +52,35 @@ beforeAll(() => {
 });
 
 describe("Tailbridge", () => {
-	it("rejects a virtual network that the data plane does not support", () => {
-		expect(
-			() =>
-				new Tailbridge("UnsupportedNetwork", {
-					stage: "test",
-					edgeId: "shared-edge",
-					virtualNetwork: "fd40::/11",
-					edge: {
-						provider: "digitalocean",
-						region: "nyc3",
-						size: "s-1vcpu-1gb",
-						sshSourceCidrs: ["192.0.2.0/24"],
+	beforeEach(() => resources.splice(0));
+
+	it("accepts a configurable dynamic registration network", () => {
+		expect(() =>
+			normalizeTailbridgeArgs({
+				stage: "test",
+				edgeId: "shared-edge",
+				registration: {
+					frozen: false,
+					virtualNetwork: "fd40::/10",
+					oidcPolicies: [],
+				},
+				edge: {
+					provider: "digitalocean",
+					region: "nyc3",
+					size: "s-1vcpu-1gb",
+					sshSourceCidrs: ["192.0.2.0/24"],
+				},
+				connectors: [
+					{
+						name: "api",
+						slot: 0,
+						projectId: "api-project",
+						environmentId: "api-environment",
 					},
-					connectors: [
-						{
-							name: "api",
-							slot: 0,
-							projectId: "api-project",
-							environmentId: "api-environment",
-						},
-					],
-					tailscaleAuthKey: pulumi.secret("secret-auth-key"),
-				}),
-		).toThrow(
-			"virtualNetwork must be fd20::/11 until the data plane supports other networks.",
-		);
+				],
+				tailscaleAuthKey: pulumi.secret("secret-auth-key"),
+			}),
+		).not.toThrow();
 	});
 
 	it("rejects a development package in a production stage", () => {

@@ -93,6 +93,9 @@ func (r *Rewriter) rewriteRecords(records []dns.RR) []dns.RR {
 			continue
 		}
 		header := record.Header()
+		if header.Ttl > 60 {
+			header.Ttl = 60
+		}
 		if name, ok := replaceSuffix(header.Name, railwaySuffix, r.suffix); ok {
 			header.Name = name
 		}

@@ -21,7 +21,7 @@
 	},
 	"scripts": {
 		"build:metadata": "node infra/generate-build.mjs",
-		"build:package": "tsup infra/index.ts --format esm --dts --clean && cp infra/edge/compose.yml dist/compose.yml",
+		"build:package": "tsup infra/index.ts --format esm --dts --clean && cp infra/edge/compose.yml dist/compose.yml && mkdir -p dist/templates/railway && cp templates/railway/railway.toml dist/templates/railway/railway.toml",
 		"prepack": "pnpm build:package",
 		"check:infra": "sst install && tsc --noEmit",
 		"test:infra": "vitest run",

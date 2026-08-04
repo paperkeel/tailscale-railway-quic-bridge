@@ -127,7 +127,7 @@ func TestResponseRestoresNamesTranslatesAAAAAndFiltersA(t *testing.T) {
 	if got := aaaa.AAAA.String(); got != "fd20:3456::42" {
 		t.Fatalf("AAAA = %s, want fd20:3456::42", got)
 	}
-	if aaaa.Hdr.Ttl != 73 || aaaa.Hdr.Name != "api.project.railway.internal." {
+	if aaaa.Hdr.Ttl != 60 || aaaa.Hdr.Name != "api.project.railway.internal." {
 		t.Fatalf("AAAA metadata = %+v", aaaa.Hdr)
 	}
 	cname, ok := response.Answer[1].(*dns.CNAME)

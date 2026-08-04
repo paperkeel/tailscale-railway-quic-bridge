@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -17,46 +19,78 @@ import (
 )
 
 type Common struct {
-	EdgeID      string
-	ConnectorID string
-	Environment string
-	CABundle    []byte
-	Certificate []byte
-	PrivateKey  []byte
-	AdminAddr   string
-	LogLevel    string
+	EdgeID         string
+	ConnectorID    string
+	Environment    string
+	CABundle       []byte
+	Certificate    []byte
+	PrivateKey     []byte
+	GetCertificate func(*tls.ClientHelloInfo) (*tls.Certificate, error) `json:"-"`
+	AdminAddr      string
+	LogLevel       string
 }
 
 type Edge struct {
 	Common
-	Connectors      []ConnectorTarget
-	QUICListenAddr  string
-	TCPListenAddr   string
-	UDPListenAddr   string
-	AllowedRoutes   []netip.Prefix
-	MaxTCPFlows     int64
-	MaxUDPFlows     int64
-	UDPIdleTimeout  time.Duration
-	ManageTailscale bool
+	Connectors              []ConnectorTarget
+	RegistrationMode        string
+	QUICListenAddr          string
+	RegistrationListenAddr  string
+	ApprovalListenAddr      string
+	DNSListenAddr           string
+	RegistryPath            string
+	VirtualNetwork          netip.Prefix
+	ExcludedPrefixes        []netip.Prefix
+	RegistrationFrozen      bool
+	NewProjectsFrozen       bool
+	AllowedProjectIDs       []string
+	OIDCPolicies            []byte
+	IntermediateCertificate []byte
+	IntermediatePrivateKey  []byte
+	ApprovalTailscaleTags   []string
+	PreviewLease            time.Duration
+	PersistentLease         time.Duration
+	SlotQuarantine          time.Duration
+	PersistentEnvironments  []string
+	ReconcileInterval       time.Duration
+	TCPListenAddr           string
+	UDPListenAddr           string
+	AllowedRoutes           []netip.Prefix
+	MaxTCPFlows             int64
+	MaxUDPFlows             int64
+	UDPIdleTimeout          time.Duration
+	ManageTailscale         bool
 }
 
 type Connector struct {
 	Common
-	EdgeEndpoint        string
-	VirtualPrefix       netip.Prefix
-	RealPrefix          netip.Prefix
-	DNSSuffix           string
-	AllowedDestinations []netip.Prefix
-	MaxTCPFlows         int64
-	MaxUDPFlows         int64
-	DialTimeout         time.Duration
-	ReconnectMin        time.Duration
-	ReconnectMax        time.Duration
-	UDPIdleTimeout      time.Duration
+	RegistrationMode     string
+	RegistrationEndpoint string
+	IdentityDir          string
+	EnrollmentNonce      string
+	ProjectID            string
+	EnvironmentID        string
+	EnvironmentName      string
+	DeploymentID         string
+	ProjectAlias         string
+	EnvironmentAlias     string
+	IdentityKeyID        string
+	EdgeEndpoint         string
+	VirtualPrefix        netip.Prefix
+	RealPrefix           netip.Prefix
+	DNSSuffix            string
+	AllowedDestinations  []netip.Prefix
+	MaxTCPFlows          int64
+	MaxUDPFlows          int64
+	DialTimeout          time.Duration
+	ReconnectMin         time.Duration
+	ReconnectMax         time.Duration
+	UDPIdleTimeout       time.Duration
 }
 
 type ConnectorTarget struct {
 	ConnectorID   string
+	ProjectID     string
 	Environment   string
 	Slot          int
 	VirtualPrefix netip.Prefix
@@ -66,6 +100,7 @@ type ConnectorTarget struct {
 
 type connectorTargetJSON struct {
 	ConnectorID   string `json:"connectorId"`
+	ProjectID     string `json:"projectId,omitempty"`
 	Environment   string `json:"environment"`
 	Slot          int    `json:"slot"`
 	VirtualPrefix string `json:"virtualPrefix"`
@@ -78,9 +113,18 @@ func LoadEdge() (Edge, error) {
 	if err != nil {
 		return Edge{}, err
 	}
-	connectors, err := connectorTargets(required("TB_CONNECTORS_B64"))
-	if err != nil {
-		return Edge{}, fmt.Errorf("TB_CONNECTORS_B64: %w", err)
+	registrationMode := value("TB_REGISTRATION_MODE", "static")
+	if registrationMode != "static" && registrationMode != "dynamic" && registrationMode != "migration" {
+		return Edge{}, errors.New("TB_REGISTRATION_MODE must be static, dynamic, or migration")
+	}
+	var connectors []ConnectorTarget
+	if encoded := required("TB_CONNECTORS_B64"); encoded != "" {
+		connectors, err = connectorTargets(encoded)
+		if err != nil {
+			return Edge{}, fmt.Errorf("TB_CONNECTORS_B64: %w", err)
+		}
+	} else if registrationMode == "static" {
+		return Edge{}, errors.New("TB_CONNECTORS_B64 is required in static registration mode")
 	}
 	routes := make([]netip.Prefix, 0, len(connectors))
 	for _, connector := range connectors {
@@ -102,23 +146,99 @@ func LoadEdge() (Edge, error) {
 	if err != nil {
 		return Edge{}, err
 	}
+	virtualNetwork, err := virtualNetworkValue(value("TB_VIRTUAL_NETWORK", "fd40::/10"))
+	if err != nil {
+		return Edge{}, err
+	}
+	excludedPrefixes, err := prefixes(value("TB_EXCLUDED_PREFIXES", "fd12::/16"))
+	if err != nil {
+		return Edge{}, fmt.Errorf("TB_EXCLUDED_PREFIXES: %w", err)
+	}
+	for _, excluded := range excludedPrefixes {
+		if virtualNetwork.Contains(excluded.Addr()) || excluded.Contains(virtualNetwork.Addr()) {
+			return Edge{}, fmt.Errorf("TB_VIRTUAL_NETWORK must not overlap excluded prefix %s", excluded)
+		}
+	}
+	registrationFrozen, err := boolValue("TB_REGISTRATION_FROZEN", false)
+	if err != nil {
+		return Edge{}, err
+	}
+	newProjectsFrozen, err := boolValue("TB_NEW_PROJECTS_FROZEN", true)
+	if err != nil {
+		return Edge{}, err
+	}
+	previewLease, err := duration("TB_PREVIEW_LEASE", 24*time.Hour)
+	if err != nil {
+		return Edge{}, err
+	}
+	persistentLease, err := duration("TB_PERSISTENT_LEASE", 30*24*time.Hour)
+	if err != nil {
+		return Edge{}, err
+	}
+	quarantine, err := duration("TB_SLOT_QUARANTINE", 24*time.Hour)
+	if err != nil {
+		return Edge{}, err
+	}
+	reconcileInterval, err := duration("TB_RECONCILE_INTERVAL", time.Minute)
+	if err != nil {
+		return Edge{}, err
+	}
+	var oidcPolicies, intermediateCertificate, intermediatePrivateKey []byte
+	if registrationMode != "static" {
+		oidcPolicies, err = decoded("TB_OIDC_POLICIES_B64")
+		if err != nil {
+			return Edge{}, err
+		}
+		intermediateCertificate, err = decoded("TB_INTERMEDIATE_CERT_B64")
+		if err != nil {
+			return Edge{}, err
+		}
+		intermediatePrivateKey, err = decoded("TB_INTERMEDIATE_KEY_B64")
+		if err != nil {
+			return Edge{}, err
+		}
+	}
+	allowedProjectIDs, err := decodedStringList("TB_ALLOWED_PROJECT_IDS_B64")
+	if err != nil {
+		return Edge{}, err
+	}
 	edge := Edge{
-		Common:          c,
-		Connectors:      connectors,
-		QUICListenAddr:  value("TB_QUIC_LISTEN_ADDR", ":4433"),
-		TCPListenAddr:   value("TB_TCP_LISTEN_ADDR", "[::]:15001"),
-		UDPListenAddr:   value("TB_UDP_LISTEN_ADDR", "[::]:15002"),
-		AllowedRoutes:   routes,
-		MaxTCPFlows:     maxFlows,
-		MaxUDPFlows:     maxUDPFlows,
-		UDPIdleTimeout:  udpIdle,
-		ManageTailscale: manageTailscale,
+		Common:                  c,
+		Connectors:              connectors,
+		RegistrationMode:        registrationMode,
+		QUICListenAddr:          value("TB_QUIC_LISTEN_ADDR", ":4433"),
+		RegistrationListenAddr:  value("TB_REGISTRATION_LISTEN_ADDR", ":4434"),
+		ApprovalListenAddr:      value("TB_APPROVAL_LISTEN_ADDR", "tailscale0:9443"),
+		DNSListenAddr:           value("TB_DNS_LISTEN_ADDR", "tailscale0:53"),
+		RegistryPath:            value("TB_REGISTRY_PATH", "/var/lib/tailbridge/registry/tailbridge.db"),
+		VirtualNetwork:          virtualNetwork,
+		ExcludedPrefixes:        excludedPrefixes,
+		RegistrationFrozen:      registrationFrozen,
+		NewProjectsFrozen:       newProjectsFrozen,
+		AllowedProjectIDs:       allowedProjectIDs,
+		OIDCPolicies:            oidcPolicies,
+		IntermediateCertificate: intermediateCertificate,
+		IntermediatePrivateKey:  intermediatePrivateKey,
+		ApprovalTailscaleTags:   commaValues(value("TB_APPROVAL_TAILSCALE_TAGS", "tag:tailbridge-ci")),
+		PreviewLease:            previewLease,
+		PersistentLease:         persistentLease,
+		SlotQuarantine:          quarantine,
+		PersistentEnvironments:  commaValues(value("TB_PERSISTENT_ENVIRONMENTS", "production,staging,development")),
+		ReconcileInterval:       reconcileInterval,
+		TCPListenAddr:           value("TB_TCP_LISTEN_ADDR", "[::]:15001"),
+		UDPListenAddr:           value("TB_UDP_LISTEN_ADDR", "[::]:15002"),
+		AllowedRoutes:           routes,
+		MaxTCPFlows:             maxFlows,
+		MaxUDPFlows:             maxUDPFlows,
+		UDPIdleTimeout:          udpIdle,
+		ManageTailscale:         manageTailscale,
 	}
 	for name, address := range map[string]string{
-		"TB_ADMIN_LISTEN_ADDR": edge.AdminAddr,
-		"TB_QUIC_LISTEN_ADDR":  edge.QUICListenAddr,
-		"TB_TCP_LISTEN_ADDR":   edge.TCPListenAddr,
-		"TB_UDP_LISTEN_ADDR":   edge.UDPListenAddr,
+		"TB_ADMIN_LISTEN_ADDR":        edge.AdminAddr,
+		"TB_QUIC_LISTEN_ADDR":         edge.QUICListenAddr,
+		"TB_TCP_LISTEN_ADDR":          edge.TCPListenAddr,
+		"TB_UDP_LISTEN_ADDR":          edge.UDPListenAddr,
+		"TB_REGISTRATION_LISTEN_ADDR": edge.RegistrationListenAddr,
 	} {
 		if err := validateAddress(name, address, false); err != nil {
 			return Edge{}, err
@@ -128,6 +248,13 @@ func LoadEdge() (Edge, error) {
 }
 
 func LoadConnector() (Connector, error) {
+	registrationMode := value("TB_REGISTRATION_MODE", "static")
+	if registrationMode == "dynamic" {
+		return loadDynamicConnector()
+	}
+	if registrationMode != "static" {
+		return Connector{}, errors.New("TB_REGISTRATION_MODE must be static or dynamic")
+	}
 	adminAddress := "[::]:9002"
 	if port := required("PORT"); port != "" && required("TB_ADMIN_LISTEN_ADDR") == "" {
 		parsed, err := strconv.ParseUint(port, 10, 16)
@@ -198,6 +325,7 @@ func LoadConnector() (Connector, error) {
 	}
 	return Connector{
 		Common:              c,
+		RegistrationMode:    "static",
 		EdgeEndpoint:        edgeEndpoint,
 		VirtualPrefix:       virtualPrefix,
 		RealPrefix:          realPrefix,
@@ -210,6 +338,106 @@ func LoadConnector() (Connector, error) {
 		ReconnectMax:        maxDelay,
 		UDPIdleTimeout:      udpIdle,
 	}, nil
+}
+
+func loadDynamicConnector() (Connector, error) {
+	adminAddress := "[::]:9002"
+	if port := required("PORT"); port != "" && required("TB_ADMIN_LISTEN_ADDR") == "" {
+		parsed, err := strconv.ParseUint(port, 10, 16)
+		if err != nil || parsed == 0 {
+			return Connector{}, fmt.Errorf("PORT must contain a valid TCP port. The value is %q.", port)
+		}
+		adminAddress = "[::]:" + port
+	}
+	trust, err := decoded("TB_TRUST_BUNDLE_B64")
+	if err != nil {
+		return Connector{}, err
+	}
+	destinations, err := prefixes(value("TB_ALLOWED_DESTINATIONS", "fd12::/16"))
+	if err != nil {
+		return Connector{}, fmt.Errorf("TB_ALLOWED_DESTINATIONS: %w", err)
+	}
+	realPrefix, err := ipv6Prefix16("TB_REAL_PREFIX", value("TB_REAL_PREFIX", "fd12::/16"))
+	if err != nil {
+		return Connector{}, err
+	}
+	maxTCP, err := int64Value("TB_MAX_TCP_FLOWS", 4096)
+	if err != nil {
+		return Connector{}, err
+	}
+	maxUDP, err := int64Value("TB_MAX_UDP_FLOWS", 4096)
+	if err != nil {
+		return Connector{}, err
+	}
+	dialTimeout, err := duration("TB_TCP_DIAL_TIMEOUT", 10*time.Second)
+	if err != nil {
+		return Connector{}, err
+	}
+	reconnectMin, err := duration("TB_RECONNECT_MIN_DELAY", time.Second)
+	if err != nil {
+		return Connector{}, err
+	}
+	reconnectMax, err := duration("TB_RECONNECT_MAX_DELAY", 30*time.Second)
+	if err != nil {
+		return Connector{}, err
+	}
+	udpIdle, err := duration("TB_UDP_IDLE_TIMEOUT", 30*time.Second)
+	if err != nil {
+		return Connector{}, err
+	}
+	result := Connector{
+		RegistrationMode:     "dynamic",
+		RegistrationEndpoint: required("TB_REGISTRATION_ENDPOINT"),
+		IdentityDir:          value("TB_IDENTITY_DIR", "/var/lib/tailbridge"),
+		EnrollmentNonce:      required("TB_ENROLLMENT_NONCE"),
+		ProjectID:            required("RAILWAY_PROJECT_ID"),
+		EnvironmentID:        required("RAILWAY_ENVIRONMENT_ID"),
+		EnvironmentName:      required("RAILWAY_ENVIRONMENT_NAME"),
+		DeploymentID:         required("RAILWAY_DEPLOYMENT_ID"),
+		ProjectAlias:         required("TB_DNS_PROJECT_ALIAS"),
+		EnvironmentAlias:     required("TB_DNS_ENVIRONMENT_ALIAS"),
+		EdgeEndpoint:         required("TB_EDGE_ENDPOINT"),
+		RealPrefix:           realPrefix,
+		AllowedDestinations:  destinations,
+		MaxTCPFlows:          maxTCP,
+		MaxUDPFlows:          maxUDP,
+		DialTimeout:          dialTimeout,
+		ReconnectMin:         reconnectMin,
+		ReconnectMax:         reconnectMax,
+		UDPIdleTimeout:       udpIdle,
+		Common:               Common{EdgeID: required("TB_EDGE_ID"), CABundle: trust, AdminAddr: value("TB_ADMIN_LISTEN_ADDR", adminAddress), LogLevel: value("TB_LOG_LEVEL", "info")},
+	}
+	for name, candidate := range map[string]string{
+		"TB_EDGE_ENDPOINT":         result.EdgeEndpoint,
+		"TB_REGISTRATION_ENDPOINT": result.RegistrationEndpoint,
+		"RAILWAY_PROJECT_ID":       result.ProjectID,
+		"RAILWAY_ENVIRONMENT_ID":   result.EnvironmentID,
+		"RAILWAY_ENVIRONMENT_NAME": result.EnvironmentName,
+		"TB_DNS_PROJECT_ALIAS":     result.ProjectAlias,
+		"TB_DNS_ENVIRONMENT_ALIAS": result.EnvironmentAlias,
+	} {
+		if candidate == "" {
+			return Connector{}, fmt.Errorf("%s is required in dynamic registration mode", name)
+		}
+	}
+	if !validDNSLabel(result.ProjectAlias) || !validDNSLabel(result.EnvironmentAlias) {
+		return Connector{}, errors.New("TB_DNS_PROJECT_ALIAS and TB_DNS_ENVIRONMENT_ALIAS must be valid DNS labels")
+	}
+	if result.EnrollmentNonce == "" {
+		if _, err := os.Stat(filepath.Join(result.IdentityDir, "registration.json")); errors.Is(err, os.ErrNotExist) {
+			return Connector{}, errors.New("TB_ENROLLMENT_NONCE is required for the first dynamic registration")
+		}
+	}
+	if err := validateAddress("TB_EDGE_ENDPOINT", result.EdgeEndpoint, true); err != nil {
+		return Connector{}, err
+	}
+	if err := validateAddress("TB_REGISTRATION_ENDPOINT", result.RegistrationEndpoint, true); err != nil {
+		return Connector{}, err
+	}
+	if err := validateAddress("TB_ADMIN_LISTEN_ADDR", result.AdminAddr, false); err != nil {
+		return Connector{}, err
+	}
+	return result, nil
 }
 
 func loadCommon(defaultAdmin string, requireConnector bool) (Common, error) {
@@ -319,7 +547,7 @@ func connectorTargets(encoded string) ([]ConnectorTarget, error) {
 		seenSlots[value.Slot] = struct{}{}
 		seenPrefixes[virtualPrefix] = struct{}{}
 		result = append(result, ConnectorTarget{
-			ConnectorID: value.ConnectorID, Environment: value.Environment, Slot: value.Slot,
+			ConnectorID: value.ConnectorID, ProjectID: value.ProjectID, Environment: value.Environment, Slot: value.Slot,
 			VirtualPrefix: virtualPrefix, RealPrefix: realPrefix, DNSSuffix: suffix,
 		})
 	}
@@ -332,6 +560,53 @@ func ipv6Prefix16(name, raw string) (netip.Prefix, error) {
 		return netip.Prefix{}, fmt.Errorf("%s must be a canonical IPv6 /16", name)
 	}
 	return prefix, nil
+}
+
+func virtualNetworkValue(raw string) (netip.Prefix, error) {
+	prefix, err := netip.ParsePrefix(strings.TrimSpace(raw))
+	if err != nil || !prefix.Addr().Is6() || prefix.Bits() < 10 || prefix.Bits() > 16 || prefix != prefix.Masked() {
+		return netip.Prefix{}, errors.New("TB_VIRTUAL_NETWORK must be a canonical IPv6 prefix from /10 through /16")
+	}
+	if !netip.MustParsePrefix("fd00::/8").Contains(prefix.Addr()) {
+		return netip.Prefix{}, errors.New("TB_VIRTUAL_NETWORK must be inside fd00::/8")
+	}
+	return prefix, nil
+}
+
+func commaValues(raw string) []string {
+	var values []string
+	for _, part := range strings.Split(raw, ",") {
+		if value := strings.TrimSpace(part); value != "" {
+			values = append(values, value)
+		}
+	}
+	return values
+}
+
+func decodedStringList(name string) ([]string, error) {
+	raw := required(name)
+	if raw == "" {
+		return nil, nil
+	}
+	payload, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil {
+		return nil, fmt.Errorf("%s is not valid base64: %w", name, err)
+	}
+	var values []string
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&values); err != nil {
+		return nil, fmt.Errorf("%s does not contain a string array: %w", name, err)
+	}
+	if decoder.Decode(&struct{}{}) != io.EOF {
+		return nil, fmt.Errorf("%s contains data after the string array", name)
+	}
+	for _, item := range values {
+		if strings.TrimSpace(item) == "" {
+			return nil, fmt.Errorf("%s contains an empty project ID", name)
+		}
+	}
+	return values, nil
 }
 
 func dnsSuffixValue(name, raw string) (string, error) {

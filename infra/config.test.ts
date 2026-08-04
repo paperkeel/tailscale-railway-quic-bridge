@@ -54,16 +54,25 @@ describe("normalizeTailbridgeArgs", () => {
 
 	it.each([
 		[
-			args([{ name: "api", slot: 0 }, { name: "api", slot: 1 }]),
+			args([
+				{ name: "api", slot: 0 },
+				{ name: "api", slot: 1 },
+			]),
 			"connector name api must be unique.",
 		],
 		[
-			args([{ name: "api", slot: 0 }, { name: "admin", slot: 0 }]),
+			args([
+				{ name: "api", slot: 0 },
+				{ name: "admin", slot: 0 },
+			]),
 			"connector slot 0 must be unique.",
 		],
 		[args([{ name: "api", slot: 32 }]), "slot must be an integer"],
-		[{ ...args([{ name: "api", slot: 0 }]), virtualNetwork: "fd20::/12" }, "IPv6 /11"],
-		[args([]), "between 1 and 32"],
+		[
+			{ ...args([{ name: "api", slot: 0 }]), virtualNetwork: "fd20::/12" },
+			"IPv6 /11",
+		],
+		[args([]), "at least one target"],
 	])("rejects invalid component arguments", (input, message) => {
 		expect(() => normalizeTailbridgeArgs(input)).toThrow(message);
 	});

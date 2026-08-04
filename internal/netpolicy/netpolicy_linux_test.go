@@ -211,6 +211,27 @@ func TestApplyReturnsGenuinePreCleanErrors(t *testing.T) {
 	}
 }
 
+func TestReplaceKeepsPreviousRoutesOnFailure(t *testing.T) {
+	policy := testPolicy(t)
+	original := append([]netip.Prefix(nil), policy.routes...)
+	want := []netip.Prefix{netip.MustParsePrefix("fd40::/16")}
+	var script string
+	policy.run = func(_ context.Context, name string, arguments []string, stdin string) error {
+		if name != "nft" || !reflect.DeepEqual(arguments, []string{"-f", "-"}) {
+			t.Fatalf("Replace() command = %s %v", name, arguments)
+		}
+		script = stdin
+		return nil
+	}
+	if err := policy.Replace(context.Background(), want); err != nil || !reflect.DeepEqual(policy.routes, want) || !strings.Contains(script, "delete table inet tailbridge") {
+		t.Fatalf("Replace() routes=%v script=%q err=%v", policy.routes, script, err)
+	}
+	policy.run = func(context.Context, string, []string, string) error { return errors.New("failed") }
+	if err := policy.Replace(context.Background(), original); err == nil || !reflect.DeepEqual(policy.routes, want) {
+		t.Fatalf("failed Replace() routes=%v err=%v", policy.routes, err)
+	}
+}
+
 func TestWaitForTailscale(t *testing.T) {
 	calls := 0
 	err := waitForTailscale(context.Background(), func(name string) (*net.Interface, error) {

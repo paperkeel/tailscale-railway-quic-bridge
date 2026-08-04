@@ -1,6 +1,7 @@
 package status
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -447,6 +448,39 @@ func TestConfigureConnectorsClearsReadyAtomically(t *testing.T) {
 	state.ConfigureConnectors([]Connector{{ConnectorID: "first"}})
 	if state.ready.Load() || state.Snapshot().Ready {
 		t.Fatal("ConfigureConnectors() kept stale readiness")
+	}
+}
+
+func TestReconcileConnectorsPreservesCurrentSessions(t *testing.T) {
+	state := New("test")
+	state.ConfigureConnectors([]Connector{{ConnectorID: "first", Slot: 1}})
+	state.ConnectorReady("first", "session")
+	state.ReconcileConnectors([]Connector{{ConnectorID: "first", Slot: 1}, {ConnectorID: "second", Slot: 2}})
+	snapshot := state.Snapshot()
+	if snapshot.Ready || snapshot.ReadyConnectors != 1 || snapshot.Connectors[0].SessionID != "session" {
+		t.Fatalf("reconciled snapshot = %#v", snapshot)
+	}
+	state.SetRegistryMetrics(3, 2, 2, 60, 1, 4, 1, 2, 3, map[string]int64{"ready\x00persistent": 2})
+	state.ObserveRegistration("approved", "approved", 25*time.Millisecond)
+	state.ObserveOIDC("success", "accepted")
+	state.ObserveRouteReconcile("success", 50*time.Millisecond)
+	if state.registrations.Load() != 3 || state.poolAvailable.Load() != 60 || state.pendingRequests.Load() != 4 {
+		t.Fatal("SetRegistryMetrics() did not store registry gauges")
+	}
+	var metrics bytes.Buffer
+	state.writeRegistryMetrics(&metrics)
+	for _, want := range []string{
+		`tailbridge_registrations{state="ready",lease_class="persistent"} 2`,
+		`tailbridge_registration_attempts_total{result="approved",reason="approved"} 1`,
+		`tailbridge_oidc_validation_total{result="success",reason="accepted"} 1`,
+		`tailbridge_route_reconcile_total{result="success"} 1`,
+		"tailbridge_routes_pending 1",
+		"tailbridge_certificates_expiring 2",
+		"tailbridge_leases_expiring 3",
+	} {
+		if !strings.Contains(metrics.String(), want) {
+			t.Errorf("registry metrics do not contain %q\n%s", want, metrics.String())
+		}
 	}
 }
 

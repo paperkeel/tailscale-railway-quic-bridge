@@ -31,7 +31,7 @@ func TestServerTLSConfiguration(t *testing.T) {
 	if configuration.ClientCAs == nil || len(configuration.Certificates) != 1 {
 		t.Fatal("server TLS credentials are incomplete")
 	}
-	if len(configuration.NextProtos) != 1 || configuration.NextProtos[0] != protocol.ALPN {
+	if len(configuration.NextProtos) != 2 || configuration.NextProtos[0] != protocol.ALPNV3 || configuration.NextProtos[1] != protocol.ALPN {
 		t.Fatalf("got ALPN values %v", configuration.NextProtos)
 	}
 }
@@ -103,6 +103,16 @@ func TestVerifyIdentityRejectsMissingCertificate(t *testing.T) {
 	}
 }
 
+func TestVerifyRoleIdentity(t *testing.T) {
+	_, leaf, roots := testCredentials(t, "connector", "railway-production", x509.ExtKeyUsageClientAuth, time.Now().Add(time.Hour))
+	if err := verifyRoleIdentity(roots, "connector", x509.ExtKeyUsageClientAuth)(tls.ConnectionState{PeerCertificates: []*x509.Certificate{leaf}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyRoleIdentity(roots, "edge", x509.ExtKeyUsageClientAuth)(tls.ConnectionState{PeerCertificates: []*x509.Certificate{leaf}}); err == nil {
+		t.Fatal("verifyRoleIdentity() accepted the wrong role")
+	}
+}
+
 func TestCredentialsRejectInvalidInput(t *testing.T) {
 	valid, _, _ := testCredentials(t, "edge", "test", x509.ExtKeyUsageServerAuth, time.Now().Add(time.Hour))
 	tests := []struct {
@@ -118,6 +128,55 @@ func TestCredentialsRejectInvalidInput(t *testing.T) {
 				t.Fatal("expected invalid TLS credentials to fail")
 			}
 		})
+	}
+}
+
+func TestRegistrationTLSConfigurations(t *testing.T) {
+	serverCommon, _, _ := testCredentials(t, "edge", "shared-edge", x509.ExtKeyUsageServerAuth, time.Now().Add(time.Hour))
+	serverCommon.EdgeID = "shared-edge"
+	server, err := RegistrationServerTLS(serverCommon)
+	if err != nil || len(server.NextProtos) != 1 || server.NextProtos[0] != protocol.RegistrationALPN {
+		t.Fatalf("RegistrationServerTLS() = %#v, %v", server, err)
+	}
+	client, err := RegistrationClientTLS(config.Common{EdgeID: "shared-edge", CABundle: serverCommon.CABundle})
+	if err != nil || client.VerifyConnection == nil || client.NextProtos[0] != protocol.RegistrationALPN {
+		t.Fatalf("RegistrationClientTLS() = %#v, %v", client, err)
+	}
+	if _, err := RegistrationClientTLS(config.Common{CABundle: []byte("invalid")}); err == nil {
+		t.Fatal("RegistrationClientTLS() accepted an invalid trust bundle")
+	}
+	if _, err := RegistrationServerTLS(config.Common{}); err == nil {
+		t.Fatal("RegistrationServerTLS() accepted missing credentials")
+	}
+	dynamicCertificate, err := tls.X509KeyPair(serverCommon.Certificate, serverCommon.PrivateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverCommon.GetCertificate = func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return &dynamicCertificate, nil }
+	server, err = RegistrationServerTLS(serverCommon)
+	if err != nil || server.GetCertificate == nil || len(server.Certificates) != 0 {
+		t.Fatalf("dynamic RegistrationServerTLS() = %#v, %v", server, err)
+	}
+	server, err = ServerTLS(serverCommon)
+	if err != nil || server.GetCertificate == nil || len(server.Certificates) != 0 {
+		t.Fatalf("dynamic ServerTLS() = %#v, %v", server, err)
+	}
+}
+
+func TestPeerConnectorIdentityV3(t *testing.T) {
+	_, leaf, _ := testCredentials(t, "connector", "project/environment/key", x509.ExtKeyUsageClientAuth, time.Now().Add(time.Hour))
+	project, environment, key, err := PeerConnectorIdentityV3(tls.ConnectionState{PeerCertificates: []*x509.Certificate{leaf}})
+	if err != nil || project != "project" || environment != "environment" || key != "key" {
+		t.Fatalf("PeerConnectorIdentityV3() = %q, %q, %q, %v", project, environment, key, err)
+	}
+	if _, _, _, err := PeerConnectorIdentityV3(tls.ConnectionState{}); err == nil {
+		t.Fatal("PeerConnectorIdentityV3() accepted a missing certificate")
+	}
+	common, _, _ := testCredentials(t, "connector", "project/environment/key", x509.ExtKeyUsageClientAuth, time.Now().Add(time.Hour))
+	common.EdgeID = "edge"
+	common.Environment = "environment"
+	if client, err := ClientTLS(common); err != nil || client.NextProtos[0] != protocol.ALPNV3 {
+		t.Fatalf("dynamic ClientTLS() = %#v, %v", client, err)
 	}
 }
 

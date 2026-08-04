@@ -13,6 +13,8 @@ import (
 	"net"
 	"net/netip"
 	"os/exec"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -22,8 +24,11 @@ import (
 	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/netpolicy"
 	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/protocol"
 	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/proxy"
+	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/reconcile"
+	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/registry"
 	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/status"
 	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/transport"
+	"github.com/miekg/dns"
 	"github.com/quic-go/quic-go"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -33,11 +38,13 @@ import (
 )
 
 type Server struct {
-	config   config.Edge
-	logger   *slog.Logger
-	status   *status.Server
-	registry map[string]*connectorEntry
-	routes   []*connectorEntry
+	config     config.Edge
+	logger     *slog.Logger
+	status     *status.Server
+	registry   map[string]*connectorEntry
+	routes     []*connectorEntry
+	registryMu sync.RWMutex
+	store      *registry.Store
 	// session keeps the single-connector test and API surface compatible.
 	session     atomic.Pointer[session]
 	connections sync.Map
@@ -64,6 +71,7 @@ type edgeUDPFlow struct {
 	translated  netip.AddrPort
 	reply       *net.UDPConn
 	lastUsed    time.Time
+	sharedReply bool
 }
 
 type session struct {
@@ -80,6 +88,7 @@ type session struct {
 
 type networkPolicy interface {
 	Apply(context.Context) error
+	Replace(context.Context, []netip.Prefix) error
 	Close(context.Context) error
 }
 
@@ -121,6 +130,73 @@ func New(cfg config.Edge, logger *slog.Logger, state *status.Server) *Server {
 	}
 	state.ConfigureConnectors(configured)
 	return server
+}
+
+func NewWithStore(ctx context.Context, cfg config.Edge, store *registry.Store, logger *slog.Logger, state *status.Server) (*Server, error) {
+	server := New(cfg, logger, state)
+	server.store = store
+	if err := server.refreshDynamic(ctx); err != nil {
+		return nil, err
+	}
+	return server, nil
+}
+
+func (s *Server) refreshDynamic(ctx context.Context) error {
+	if s.store == nil {
+		return nil
+	}
+	registrations, err := s.store.Active(ctx)
+	if err != nil {
+		return err
+	}
+	stats, err := s.store.Stats(ctx)
+	if err != nil {
+		return err
+	}
+	s.registryMu.Lock()
+	defer s.registryMu.Unlock()
+	staticCount := len(s.config.Connectors)
+	if staticCount > len(s.routes) {
+		staticCount = len(s.routes)
+	}
+	routes := append([]*connectorEntry(nil), s.routes[:staticCount]...)
+	for _, registration := range registrations {
+		if registration.IdentityType != "dynamic-v3" {
+			continue
+		}
+		routes = slices.DeleteFunc(routes, func(entry *connectorEntry) bool {
+			return entry.target.VirtualPrefix == registration.VirtualPrefix
+		})
+		key := registration.ProjectID + "/" + registration.EnvironmentID
+		entry := s.registry[key]
+		if entry == nil {
+			virtualBytes := registration.VirtualPrefix.Addr().As16()
+			baseBytes := s.config.VirtualNetwork.Addr().As16()
+			entry = &connectorEntry{target: config.ConnectorTarget{ConnectorID: key, Environment: registration.EnvironmentID, Slot: int(virtualBytes[1] - baseBytes[1]), VirtualPrefix: registration.VirtualPrefix, RealPrefix: registration.RealPrefix, DNSSuffix: registration.ProjectAlias + "." + registration.EnvironmentAlias + ".railway.internal"}}
+			s.registry[key] = entry
+		}
+		routes = append(routes, entry)
+	}
+	s.routes = routes
+	configured := make([]status.Connector, 0, len(routes))
+	for _, entry := range routes {
+		configured = append(configured, status.Connector{ConnectorID: entry.target.ConnectorID, Slot: entry.target.Slot, VirtualPrefix: entry.target.VirtualPrefix.String(), RealPrefix: entry.target.RealPrefix.String()})
+	}
+	s.status.ReconcileConnectors(configured)
+	s.status.SetRegistryMetrics(stats.Registrations, stats.Active, stats.Allocated, stats.Available, stats.Quarantined, stats.Pending, stats.RoutesPending, stats.CertificatesSoon, stats.LeasesSoon, stats.RegistrationState)
+	return nil
+}
+
+type reconciledPolicy struct {
+	policy networkPolicy
+	server *Server
+}
+
+func (p reconciledPolicy) Replace(ctx context.Context, routes []netip.Prefix) error {
+	if err := p.policy.Replace(ctx, routes); err != nil {
+		return err
+	}
+	return p.server.refreshDynamic(ctx)
 }
 
 func (s *Server) Run(ctx context.Context) error {
@@ -191,12 +267,36 @@ func (s *Server) Run(ctx context.Context) error {
 		return fmt.Errorf("listen for transparent UDP: %w", err)
 	}
 	defer udpListener.Close()
+	var dnsListener *net.UDPConn
+	if s.store != nil {
+		dnsAddress, err := listenerInterfaceAddress(s.config.DNSListenAddr)
+		if err != nil {
+			return err
+		}
+		dnsListener, err = net.ListenUDP("udp", dnsAddress)
+		if err != nil {
+			return fmt.Errorf("listen for DNS: %w", err)
+		}
+		defer dnsListener.Close()
+	}
 	s.status.SetHealthy(true)
 
 	group, groupContext := errgroup.WithContext(runContext)
 	group.Go(func() error { return s.acceptConnectors(groupContext, listener) })
 	group.Go(func() error { return s.acceptTCP(groupContext, tcpListener) })
 	group.Go(func() error { return s.acceptUDP(groupContext, udpListener) })
+	if dnsListener != nil {
+		group.Go(func() error { return s.acceptDNS(groupContext, dnsListener) })
+	}
+	if s.store != nil {
+		staticRoutes := make([]netip.Prefix, 0, len(s.config.Connectors))
+		for _, connector := range s.config.Connectors {
+			staticRoutes = append(staticRoutes, connector.VirtualPrefix)
+		}
+		group.Go(func() error {
+			return reconcile.NewRoutes(s.store, reconciledPolicy{policy: policy, server: s}, staticRoutes, s.config.ReconcileInterval, s.config.SlotQuarantine, s.logger, s.status).Run(groupContext)
+		})
+	}
 	if bootDone != nil {
 		group.Go(func() error {
 			select {
@@ -218,7 +318,13 @@ func (s *Server) Run(ctx context.Context) error {
 		_ = listener.Close()
 		_ = tcpListener.Close()
 		_ = udpListener.Close()
-		for _, entry := range s.routes {
+		if dnsListener != nil {
+			_ = dnsListener.Close()
+		}
+		s.registryMu.RLock()
+		routes := append([]*connectorEntry(nil), s.routes...)
+		s.registryMu.RUnlock()
+		for _, entry := range routes {
 			if active := entry.active.Load(); active != nil {
 				_ = active.connection.CloseWithError(0, "edge shutting down")
 			}
@@ -269,29 +375,82 @@ func (s *Server) authenticate(ctx context.Context, conn *quic.Conn) {
 		return
 	}
 	_ = control.SetDeadline(time.Now().Add(10 * time.Second))
-	var hello protocol.ConnectorHello
-	if err := protocol.ReadFrame(control, &hello); err != nil {
-		_ = conn.CloseWithError(2, "The hello frame is not valid.")
-		return
+	var connectorID, environment, identityKeyID, softwareVersion string
+	var started int64
+	var rawRoutes []string
+	validProtocol := true
+	dynamic := conn.ConnectionState().TLS.NegotiatedProtocol == protocol.ALPNV3
+	if dynamic {
+		var hello protocol.ConnectorHelloV3
+		if err := protocol.ReadFrame(control, &hello); err != nil {
+			_ = conn.CloseWithError(2, "The hello frame is not valid.")
+			return
+		}
+		validProtocol = hello.ProtocolVersion == protocol.ProtocolVersionV3
+		connectorID = hello.ProjectID + "/" + hello.EnvironmentID
+		environment = hello.EnvironmentID
+		identityKeyID = hello.IdentityKeyID
+		softwareVersion = hello.SoftwareVersion
+		started = hello.StartedUnixNano
+		rawRoutes = hello.Routes
+	} else {
+		var hello protocol.ConnectorHello
+		if err := protocol.ReadFrame(control, &hello); err != nil {
+			_ = conn.CloseWithError(2, "The hello frame is not valid.")
+			return
+		}
+		validProtocol = hello.ProtocolVersion == protocol.ProtocolVersion
+		connectorID = hello.ConnectorID
+		environment = hello.Environment
+		softwareVersion = hello.SoftwareVersion
+		started = hello.StartedUnixNano
+		rawRoutes = hello.Routes
 	}
-	entry := s.registry[hello.ConnectorID]
-	if entry == nil && len(s.registry) == 0 && hello.ConnectorID == s.config.ConnectorID {
+	s.registryMu.RLock()
+	entry := s.registry[connectorID]
+	registryCount := len(s.registry)
+	s.registryMu.RUnlock()
+	if entry == nil && registryCount == 0 && connectorID == s.config.ConnectorID {
 		realPrefix := firstIPv6Prefix(s.config.AllowedRoutes)
 		entry = &connectorEntry{target: config.ConnectorTarget{ConnectorID: s.config.ConnectorID, Environment: s.config.Environment, VirtualPrefix: realPrefix, RealPrefix: realPrefix}}
 	}
-	certificateID, identityErr := connectorIdentity(conn)
-	if hello.ProtocolVersion != protocol.ProtocolVersion || entry == nil || identityErr != nil || hello.ConnectorID != certificateID || hello.Environment != entry.target.Environment {
+	identityErr := error(nil)
+	if dynamic {
+		projectID, environmentID, certificateKeyID, err := transport.PeerConnectorIdentityV3(conn.ConnectionState().TLS)
+		identityErr = err
+		if err == nil && (connectorID != projectID+"/"+environmentID || certificateKeyID != identityKeyID) {
+			identityErr = errors.New("certificate identity does not match the connector hello")
+		}
+		if err == nil && s.store != nil && entry != nil {
+			registration, lookupErr := s.store.Registration(ctx, projectID, environmentID)
+			if lookupErr == nil {
+				_, keyErr := s.store.ActiveIdentityKey(ctx, registration.ID, identityKeyID)
+				if keyErr != nil {
+					identityErr = errors.New("connector identity key is not active")
+				}
+			} else {
+				identityErr = lookupErr
+			}
+		}
+	} else {
+		certificateID, err := connectorIdentity(conn)
+		identityErr = err
+		if err == nil && connectorID != certificateID {
+			identityErr = errors.New("certificate identity does not match the connector hello")
+		}
+	}
+	if !validProtocol || entry == nil || identityErr != nil || environment != entry.target.Environment {
 		s.status.Denied()
 		_ = conn.CloseWithError(3, "The edge rejected the connector identity.")
 		return
 	}
-	if hello.StartedUnixNano <= 0 || hello.StartedUnixNano > time.Now().Add(5*time.Minute).UnixNano() {
+	if started <= 0 || started > time.Now().Add(5*time.Minute).UnixNano() {
 		s.status.Denied()
 		_ = conn.CloseWithError(3, "The connector start time is not valid.")
 		return
 	}
-	advertised := make([]netip.Prefix, 0, len(hello.Routes))
-	for _, raw := range hello.Routes {
+	advertised := make([]netip.Prefix, 0, len(rawRoutes))
+	for _, raw := range rawRoutes {
 		route, err := netip.ParsePrefix(raw)
 		if err != nil {
 			s.status.Denied()
@@ -301,7 +460,7 @@ func (s *Server) authenticate(ctx context.Context, conn *quic.Conn) {
 		advertised = append(advertised, route.Masked())
 	}
 	realRoutes := []netip.Prefix{entry.target.RealPrefix}
-	if len(s.registry) == 0 {
+	if registryCount == 0 {
 		realRoutes = s.config.AllowedRoutes
 	}
 	acceptedRoutes := config.IntersectPrefixes(realRoutes, advertised)
@@ -319,19 +478,19 @@ func (s *Server) authenticate(ctx context.Context, conn *quic.Conn) {
 	for _, route := range acceptedRoutes {
 		routes = append(routes, route.String())
 	}
-	next := &session{id: id, connectorID: entry.target.ConnectorID, slot: entry.target.Slot, started: hello.StartedUnixNano, connection: conn, routes: acceptedRoutes, virtualPrefix: entry.target.VirtualPrefix, realPrefix: entry.target.RealPrefix}
+	next := &session{id: id, connectorID: entry.target.ConnectorID, slot: entry.target.Slot, started: started, connection: conn, routes: acceptedRoutes, virtualPrefix: entry.target.VirtualPrefix, realPrefix: entry.target.RealPrefix}
 	entry.mu.Lock()
 	previous := entry.active.Load()
-	if previous == nil && len(s.registry) == 0 {
+	if previous == nil && registryCount == 0 {
 		previous = s.session.Load()
 	}
 	if previous != nil && !connectionClosed(previous.connection) && next.started <= previous.started {
 		entry.mu.Unlock()
 		_ = conn.CloseWithError(5, "newer connector session is active")
-		s.logger.Info("connector session superseded", "event.name", "connector.session", "connector_id", hello.ConnectorID, "slot", entry.target.Slot, "version", hello.SoftwareVersion)
+		s.logger.Info("connector session superseded", "event.name", "connector.session", "connector_id", connectorID, "slot", entry.target.Slot, "version", softwareVersion)
 		return
 	}
-	if err := protocol.WriteFrame(control, protocol.ConnectorAccepted{SessionID: id, ConnectorID: hello.ConnectorID, Slot: entry.target.Slot, VirtualPrefix: entry.target.VirtualPrefix.String(), RealPrefix: entry.target.RealPrefix.String(), Routes: routes, MaxTCPFlows: s.config.MaxTCPFlows}); err != nil {
+	if err := protocol.WriteFrame(control, protocol.ConnectorAccepted{SessionID: id, ConnectorID: connectorID, Slot: entry.target.Slot, VirtualPrefix: entry.target.VirtualPrefix.String(), RealPrefix: entry.target.RealPrefix.String(), Routes: routes, MaxTCPFlows: s.config.MaxTCPFlows}); err != nil {
 		entry.mu.Unlock()
 		_ = conn.CloseWithError(4, "The edge could not send the hello response.")
 		return
@@ -343,23 +502,30 @@ func (s *Server) authenticate(ctx context.Context, conn *quic.Conn) {
 		previous.draining.Store(true)
 		entry.draining = previous
 	}
-	if len(s.registry) == 0 || len(s.registry) == 1 {
+	if registryCount == 0 || registryCount == 1 {
 		s.session.Store(next)
 	}
 	entry.mu.Unlock()
 	if staleDraining != nil && staleDraining != previous {
 		_ = staleDraining.connection.CloseWithError(0, "A newer draining session replaced this session.")
 	}
-	s.status.ConnectorReady(hello.ConnectorID, id)
-	if len(s.registry) == 0 {
+	s.status.ConnectorReady(connectorID, id)
+	if registryCount == 0 {
 		s.status.SetReady(true)
 	}
-	if len(s.registry) == 0 {
+	if registryCount == 0 {
 		go s.status.ObserveQUIC(conn.Context().Done(), conn)
 	} else {
-		go s.status.ObserveConnectorQUIC(hello.ConnectorID, conn.Context().Done(), conn)
+		go s.status.ObserveConnectorQUIC(connectorID, conn.Context().Done(), conn)
 	}
-	s.logger.Info("connector session ready", "event.name", "connector.session", "session_id", id, "connector_id", hello.ConnectorID, "slot", entry.target.Slot, "version", hello.SoftwareVersion)
+	s.logger.Info("connector session ready", "event.name", "connector.session", "session_id", id, "connector_id", connectorID, "slot", entry.target.Slot, "version", softwareVersion)
+	if dynamic && s.store != nil {
+		projectID := strings.SplitN(connectorID, "/", 2)[0]
+		_ = s.store.MarkReady(ctx, projectID, environment)
+		if registration, err := s.store.Registration(ctx, projectID, environment); err == nil {
+			_ = s.store.CompleteIdentityRotation(ctx, registration.ID, identityKeyID, 24*time.Hour)
+		}
+	}
 	go s.receiveUDP(next)
 	if previous != nil {
 		go func() {
@@ -380,12 +546,12 @@ func (s *Server) authenticate(ctx context.Context, conn *quic.Conn) {
 	<-conn.Context().Done()
 	if entry.active.CompareAndSwap(next, nil) {
 		s.session.CompareAndSwap(next, nil)
-		s.status.ConnectorClosed(hello.ConnectorID, id)
-		if len(s.registry) == 0 {
+		s.status.ConnectorClosed(connectorID, id)
+		if registryCount == 0 {
 			s.status.SetReady(false)
 		}
 	}
-	s.logger.Info("connector session closed", "event.name", "connector.session", "session_id", id, "connector_id", hello.ConnectorID, "slot", entry.target.Slot, "outcome", "closed")
+	s.logger.Info("connector session closed", "event.name", "connector.session", "session_id", id, "connector_id", connectorID, "slot", entry.target.Slot, "outcome", "closed")
 }
 
 func connectorIdentity(conn *quic.Conn) (string, error) {
@@ -445,11 +611,105 @@ func (s *Server) acceptUDP(ctx context.Context, listener *net.UDPConn) error {
 	}
 }
 
+func (s *Server) acceptDNS(ctx context.Context, listener *net.UDPConn) error {
+	buffer := make([]byte, 64*1024)
+	for {
+		n, source, err := listener.ReadFromUDP(buffer)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return fmt.Errorf("receive DNS query: %w", err)
+		}
+		payload := append([]byte(nil), buffer[:n]...)
+		go s.forwardDNS(ctx, listener, source, payload)
+	}
+}
+
+func (s *Server) forwardDNS(ctx context.Context, listener *net.UDPConn, source *net.UDPAddr, payload []byte) {
+	message := new(dns.Msg)
+	if err := message.Unpack(payload); err != nil || len(message.Question) == 0 {
+		return
+	}
+	labels := dns.SplitDomainName(message.Question[0].Name)
+	if len(labels) < 5 || !strings.EqualFold(labels[len(labels)-2], "railway") || !strings.EqualFold(labels[len(labels)-1], "internal") {
+		s.writeDNSError(listener, source, message, dns.RcodeNameError)
+		return
+	}
+	projectAlias := strings.ToLower(labels[len(labels)-4])
+	environmentAlias := strings.ToLower(labels[len(labels)-3])
+	registration, err := s.store.RegistrationByAlias(ctx, projectAlias, environmentAlias)
+	if errors.Is(err, registry.ErrNotFound) {
+		s.writeDNSError(listener, source, message, dns.RcodeNameError)
+		return
+	}
+	if err != nil {
+		s.writeDNSError(listener, source, message, dns.RcodeServerFailure)
+		return
+	}
+	address := registration.VirtualPrefix.Addr().As16()
+	address[15] = 0x10
+	destination := netip.AddrPortFrom(netip.AddrFrom16(address), 53)
+	active, translated, ok := s.route(destination)
+	if !ok {
+		s.writeDNSError(listener, source, message, dns.RcodeServerFailure)
+		return
+	}
+	key := active.id + "|dns|" + source.AddrPort().String() + "|" + destination.String()
+	flow, err := s.edgeUDPFlowWithReply(active, key, source, destination, translated, listener, true)
+	if err != nil {
+		s.writeDNSError(listener, source, message, dns.RcodeServerFailure)
+		return
+	}
+	packet, err := protocol.EncodeUDP(protocol.UDPDatagram{FlowID: flow.id, Source: source.AddrPort(), Destination: translated, Payload: payload})
+	if err != nil || active.connection.SendDatagram(packet) != nil {
+		s.writeDNSError(listener, source, message, dns.RcodeServerFailure)
+	}
+}
+
+func (s *Server) writeDNSError(listener *net.UDPConn, source *net.UDPAddr, query *dns.Msg, code int) {
+	response := new(dns.Msg)
+	response.SetRcode(query, code)
+	payload, err := response.Pack()
+	if err == nil {
+		_, _ = listener.WriteToUDP(payload, source)
+	}
+}
+
+func listenerInterfaceAddress(value string) (*net.UDPAddr, error) {
+	host, port, err := net.SplitHostPort(value)
+	if err != nil {
+		return nil, fmt.Errorf("listener address %q is not valid: %w", value, err)
+	}
+	if host == "" || strings.Contains(host, ".") || strings.Contains(host, ":") {
+		return net.ResolveUDPAddr("udp", net.JoinHostPort(host, port))
+	}
+	device, err := net.InterfaceByName(host)
+	if err != nil {
+		return nil, fmt.Errorf("find listener interface %q: %w", host, err)
+	}
+	addresses, err := device.Addrs()
+	if err != nil {
+		return nil, err
+	}
+	for _, address := range addresses {
+		prefix, err := netip.ParsePrefix(address.String())
+		if err == nil && prefix.Addr().Is4() {
+			return net.ResolveUDPAddr("udp", net.JoinHostPort(prefix.Addr().String(), port))
+		}
+	}
+	return nil, fmt.Errorf("interface %q has no IPv4 address", host)
+}
+
 func (s *Server) edgeUDPFlow(active *session, key string, source *net.UDPAddr, destination netip.AddrPort) (*edgeUDPFlow, error) {
 	return s.edgeUDPFlowTranslated(active, key, source, destination, destination)
 }
 
 func (s *Server) edgeUDPFlowTranslated(active *session, key string, source *net.UDPAddr, destination, translated netip.AddrPort) (*edgeUDPFlow, error) {
+	return s.edgeUDPFlowWithReply(active, key, source, destination, translated, nil, false)
+}
+
+func (s *Server) edgeUDPFlowWithReply(active *session, key string, source *net.UDPAddr, destination, translated netip.AddrPort, reply *net.UDPConn, shared bool) (*edgeUDPFlow, error) {
 	s.udpMu.Lock()
 	defer s.udpMu.Unlock()
 	if flow := s.udpByKey[key]; flow != nil {
@@ -459,11 +719,14 @@ func (s *Server) edgeUDPFlowTranslated(active *session, key string, source *net.
 	if int64(len(s.udpByID)) >= s.config.MaxUDPFlows {
 		return nil, errors.New("the UDP flow limit is full")
 	}
-	reply, err := openUDPResponse(destination)
-	if err != nil {
-		return nil, err
+	if reply == nil {
+		var err error
+		reply, err = openUDPResponse(destination)
+		if err != nil {
+			return nil, err
+		}
 	}
-	flow := &edgeUDPFlow{id: s.flowID.Add(1), key: key, session: active, source: source, destination: destination, translated: translated, reply: reply, lastUsed: time.Now()}
+	flow := &edgeUDPFlow{id: s.flowID.Add(1), key: key, session: active, source: source, destination: destination, translated: translated, reply: reply, sharedReply: shared, lastUsed: time.Now()}
 	s.udpByKey[key] = flow
 	s.udpByID[flow.id] = flow
 	s.status.UDPFlowStarted()
@@ -479,7 +742,9 @@ func (s *Server) edgeUDPFlowTranslated(active *session, key string, source *net.
 			if time.Since(flow.lastUsed) >= s.config.UDPIdleTimeout {
 				delete(s.udpByKey, key)
 				delete(s.udpByID, flow.id)
-				_ = flow.reply.Close()
+				if !flow.sharedReply {
+					_ = flow.reply.Close()
+				}
 				s.status.UDPFlowEnded()
 				s.udpMu.Unlock()
 				return
@@ -535,13 +800,18 @@ func (s *Server) closeUDPSession(active *session) {
 		}
 		delete(s.udpByID, id)
 		delete(s.udpByKey, flow.key)
-		_ = flow.reply.Close()
+		if !flow.sharedReply {
+			_ = flow.reply.Close()
+		}
 		s.status.UDPFlowEnded()
 	}
 }
 
 func (s *Server) route(destination netip.AddrPort) (*session, netip.AddrPort, bool) {
-	for _, entry := range s.routes {
+	s.registryMu.RLock()
+	routes := append([]*connectorEntry(nil), s.routes...)
+	s.registryMu.RUnlock()
+	for _, entry := range routes {
 		if !entry.target.VirtualPrefix.Contains(destination.Addr().Unmap()) {
 			continue
 		}
@@ -555,7 +825,7 @@ func (s *Server) route(destination netip.AddrPort) (*session, netip.AddrPort, bo
 		}
 		return active, translated, true
 	}
-	if len(s.routes) != 0 {
+	if len(routes) != 0 {
 		return nil, netip.AddrPort{}, false
 	}
 	active := s.session.Load()
@@ -792,7 +1062,9 @@ func (s *Server) closeUDPFlows() {
 	s.udpByID = make(map[uint64]*edgeUDPFlow)
 	s.udpByKey = make(map[string]*edgeUDPFlow)
 	for _, flow := range flows {
-		_ = flow.reply.Close()
+		if !flow.sharedReply {
+			_ = flow.reply.Close()
+		}
 		s.status.UDPFlowEnded()
 	}
 	s.udpMu.Unlock()

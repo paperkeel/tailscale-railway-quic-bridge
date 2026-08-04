@@ -25,7 +25,18 @@ export interface TailbridgeArgs {
 		size: string;
 		sshSourceCidrs: string[];
 	};
-	connectors: TailbridgeConnectorTarget[];
+	connectors?: TailbridgeConnectorTarget[];
+	registration?: {
+		frozen: boolean;
+		newProjectsFrozen?: boolean;
+		allowedProjectIds?: string[];
+		virtualNetwork?: string;
+		excludedPrefixes?: string[];
+		oidcPolicies: pulumi.Input<unknown[]>;
+		approvalTailscaleTags?: string[];
+		edgeTailscaleTag?: string;
+		leases?: { preview?: string; persistent?: string; quarantine?: string };
+	};
 	tailscaleAuthKey: pulumi.Input<string>;
 	images?: {
 		edge?: string;
@@ -68,11 +79,6 @@ export class Tailbridge extends pulumi.ComponentResource {
 	) {
 		super("tailbridge:index:Tailbridge", name, {}, opts);
 		const normalized = normalizeTailbridgeArgs(args);
-		if (normalized.virtualNetwork !== "fd20::/11") {
-			throw new Error(
-				"virtualNetwork must be fd20::/11 until the data plane supports other networks.",
-			);
-		}
 		const images = resolveImages(normalized.stage, normalized.images);
 		const certificates = createCertificates(
 			name,
@@ -88,12 +94,14 @@ export class Tailbridge extends pulumi.ComponentResource {
 			edge: normalized.edge,
 			connectors: normalized.connectors.map((target) => ({
 				connectorId: target.name,
+				projectId: target.projectId,
 				environment: target.environmentId,
 				slot: target.slot,
 				virtualPrefix: target.virtualPrefix,
 				realPrefix: target.realPrefix,
 				dnsSuffix: target.dnsSuffix,
 			})),
+			registration: normalized.registration,
 			certificates,
 			tailscaleAuthKey: normalized.tailscaleAuthKey,
 			parent: this,
@@ -146,15 +154,17 @@ export class Tailbridge extends pulumi.ComponentResource {
 			)
 			.apply((connectors) => [...connectors]);
 		this.tailscaleRoutes = pulumi.output(
-			normalized.connectors.map((target) => target.virtualPrefix),
+			normalized.registration
+				? [normalized.virtualNetwork]
+				: normalized.connectors.map((target) => target.virtualPrefix),
 		);
 		this.tailscalePolicyFragment = this.tailscaleRoutes.apply((routes) => {
+			const edgeTag =
+				normalized.registration?.edgeTailscaleTag ?? "tag:tailbridge";
 			const fragment: TailscalePolicyFragment = {
-				tagOwners: { "tag:tailbridge": ["autogroup:admin"] },
+				tagOwners: { [edgeTag]: ["autogroup:admin"] },
 				autoApprovers: {
-					routes: Object.fromEntries(
-						routes.map((route) => [route, ["tag:tailbridge"]]),
-					),
+					routes: Object.fromEntries(routes.map((route) => [route, [edgeTag]])),
 				},
 			};
 			return fragment;
@@ -185,7 +195,10 @@ function resolveImages(
 		edge: overrides?.edge ?? tailbridgeBuild.edgeImage,
 		connector: overrides?.connector ?? tailbridgeBuild.connectorImage,
 	};
-	if (tailbridgeBuild.sourceCommit === "development" && !isDevelopmentStage(stage)) {
+	if (
+		tailbridgeBuild.sourceCommit === "development" &&
+		!isDevelopmentStage(stage)
+	) {
 		throw new Error(
 			"A development package cannot deploy outside a development or test stage.",
 		);

@@ -133,7 +133,7 @@ func initialize(arguments []string) error {
 	common := func(cert, key []byte) string {
 		return fmt.Sprintf("TB_CONNECTOR_ID=%s\nTB_ENVIRONMENT=%s\nTB_MTLS_CA_B64=%s\nTB_MTLS_CERT_B64=%s\nTB_MTLS_KEY_B64=%s\n", *connectorID, *environment, b64(caCert.Raw), b64PEM("CERTIFICATE", cert), b64PEM("PRIVATE KEY", key))
 	}
-	edge := common(edgeCert, edgeKey) + "TB_ALLOWED_ROUTES=fd12::/16\nTB_QUIC_LISTEN_ADDR=:4433\nTS_AUTHKEY=replace-me\nTS_HOSTNAME=tailbridge-" + *environment + "\nTS_STATE_DIR=/var/lib/tailscale\nTS_AUTH_ONCE=true\nTS_USERSPACE=false\nTS_EXTRA_ARGS=--advertise-routes=fd12::/16 --advertise-tags=tag:tailbridge\n"
+	edge := common(edgeCert, edgeKey) + "TB_QUIC_LISTEN_ADDR=:4433\nTS_AUTHKEY=replace-me\nTS_HOSTNAME=tailbridge-" + *environment + "\nTS_STATE_DIR=/var/lib/tailscale\nTS_AUTH_ONCE=true\nTS_USERSPACE=false\nTS_EXTRA_ARGS=--advertise-routes=fd12::/16 --advertise-tags=tag:tailbridge\n"
 	connector := common(connectorCert, connectorKey) + "TB_EDGE_ENDPOINT=" + *edgeEndpoint + "\nTB_ALLOWED_DESTINATIONS=fd12::/16\n"
 	policy := "{\n\t\"tagOwners\": { \"tag:tailbridge\": [\"autogroup:admin\"] },\n\t\"autoApprovers\": { \"routes\": { \"fd12::/16\": [\"tag:tailbridge\"] } }\n}\n"
 	files := []secretFile{

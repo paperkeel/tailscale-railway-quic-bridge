@@ -33,6 +33,9 @@ beforeAll(async () => {
 				if (args.type === "digitalocean:index/sshKey:SshKey") {
 					Object.assign(state, { fingerprint: "test-fingerprint" });
 				}
+				if (args.type === "digitalocean:index/reservedIp:ReservedIp") {
+					Object.assign(state, { ipAddress: "203.0.113.10" });
+				}
 				return { id: `${args.name}-id`, state };
 			},
 			call: (args) => args.inputs,
@@ -60,6 +63,7 @@ beforeAll(async () => {
 			connectors: [
 				{
 					connectorId: "api",
+					projectId: "project-id",
 					environment: "test",
 					slot: 0,
 					virtualPrefix: "fd20::/16",
@@ -79,6 +83,7 @@ beforeAll(async () => {
 		});
 
 		return {
+			ready: await resolve(deployment.ready.urn),
 			statusCommand: await resolve(deployment.statusCommand),
 			logsCommand: await resolve(deployment.logsCommand),
 			statusIsSecret: await pulumi.isSecret(deployment.statusCommand),
@@ -97,7 +102,7 @@ beforeAll(async () => {
 });
 
 describe("DigitalOcean edge structure", () => {
-	it("restricts SSH and opens only the two public UDP ports", () => {
+	it("restricts SSH and opens only the public UDP ports", () => {
 		const rules = edgeFirewallRules(["192.0.2.0/24"]);
 
 		expect(rules.inboundRules).toEqual([
@@ -114,6 +119,11 @@ describe("DigitalOcean edge structure", () => {
 			{
 				protocol: "udp",
 				portRange: "4433",
+				sourceAddresses: ["0.0.0.0/0", "::/0"],
+			},
+			{
+				protocol: "udp",
+				portRange: "4434",
 				sourceAddresses: ["0.0.0.0/0", "::/0"],
 			},
 		]);

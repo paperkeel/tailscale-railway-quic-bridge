@@ -16,14 +16,29 @@ func ServerTLS(c config.Common) (*tls.Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &tls.Config{
-		MinVersion:       tls.VersionTLS13,
-		Certificates:     []tls.Certificate{certificate},
-		ClientAuth:       tls.RequireAndVerifyClientCert,
-		ClientCAs:        roots,
-		NextProtos:       []string{protocol.ALPN},
-		VerifyConnection: verifyRoleIdentity(roots, "connector", x509.ExtKeyUsageClientAuth),
-	}, nil
+	configuration := &tls.Config{
+		MinVersion:   tls.VersionTLS13,
+		Certificates: []tls.Certificate{certificate},
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientCAs:    roots,
+		NextProtos:   []string{protocol.ALPNV3, protocol.ALPN},
+		VerifyConnection: func(state tls.ConnectionState) error {
+			if err := verifyPeerCertificate(state, roots, x509.ExtKeyUsageClientAuth); err != nil {
+				return err
+			}
+			if state.NegotiatedProtocol == protocol.ALPNV3 {
+				_, _, _, err := PeerConnectorIdentityV3(state)
+				return err
+			}
+			_, err := PeerIdentity(state, "connector")
+			return err
+		},
+	}
+	if c.GetCertificate != nil {
+		configuration.Certificates = nil
+		configuration.GetCertificate = c.GetCertificate
+	}
+	return configuration, nil
 }
 
 func ClientTLS(c config.Common) (*tls.Config, error) {
@@ -35,13 +50,68 @@ func ClientTLS(c config.Common) (*tls.Config, error) {
 	if edgeID == "" {
 		edgeID = c.ConnectorID
 	}
+	alpn := protocol.ALPN
+	if c.Environment != "" && c.ConnectorID != "" && strings.Contains(c.ConnectorID, "/") {
+		alpn = protocol.ALPNV3
+	}
 	return &tls.Config{
 		MinVersion:         tls.VersionTLS13,
 		Certificates:       []tls.Certificate{certificate},
 		RootCAs:            roots,
-		NextProtos:         []string{protocol.ALPN},
+		NextProtos:         []string{alpn},
 		InsecureSkipVerify: true,
 		VerifyConnection:   verifyIdentity(roots, "edge", edgeID, x509.ExtKeyUsageServerAuth),
+	}, nil
+}
+
+func PeerConnectorIdentityV3(state tls.ConnectionState) (string, string, string, error) {
+	if len(state.PeerCertificates) == 0 {
+		return "", "", "", errors.New("peer certificate is missing")
+	}
+	const prefix = "/connector/"
+	for _, candidate := range state.PeerCertificates[0].URIs {
+		if candidate.Scheme != "spiffe" || candidate.Host != "tailbridge.local" || !strings.HasPrefix(candidate.Path, prefix) || candidate.RawQuery != "" || candidate.Fragment != "" {
+			continue
+		}
+		parts := strings.Split(strings.TrimPrefix(candidate.Path, prefix), "/")
+		if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
+			return "", "", "", errors.New("peer connector identity is not valid")
+		}
+		return parts[0], parts[1], parts[2], nil
+	}
+	return "", "", "", errors.New("peer certificate has no connector identity")
+}
+
+// RegistrationServerTLS authenticates the public registration endpoint to a
+// connector. Connector authentication happens through the enrollment proof.
+func RegistrationServerTLS(c config.Common) (*tls.Config, error) {
+	certificate, err := tls.X509KeyPair(c.Certificate, c.PrivateKey)
+	if err != nil {
+		return nil, err
+	}
+	configuration := &tls.Config{
+		MinVersion:   tls.VersionTLS13,
+		Certificates: []tls.Certificate{certificate},
+		NextProtos:   []string{protocol.RegistrationALPN},
+	}
+	if c.GetCertificate != nil {
+		configuration.Certificates = nil
+		configuration.GetCertificate = c.GetCertificate
+	}
+	return configuration, nil
+}
+
+func RegistrationClientTLS(c config.Common) (*tls.Config, error) {
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(c.CABundle) {
+		return nil, errors.New("TB_TRUST_BUNDLE_B64 contains no certificates")
+	}
+	return &tls.Config{
+		MinVersion:         tls.VersionTLS13,
+		RootCAs:            roots,
+		NextProtos:         []string{protocol.RegistrationALPN},
+		InsecureSkipVerify: true,
+		VerifyConnection:   verifyIdentity(roots, "edge", c.EdgeID, x509.ExtKeyUsageServerAuth),
 	}, nil
 }
 

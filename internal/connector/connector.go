@@ -116,7 +116,10 @@ func (c *Client) serve(ctx context.Context, conn *quic.Conn) error {
 	for _, route := range c.config.AllowedDestinations {
 		routes = append(routes, route.String())
 	}
-	hello := protocol.ConnectorHello{ProtocolVersion: protocol.ProtocolVersion, ConnectorID: c.config.ConnectorID, Environment: c.config.Environment, Routes: routes, SoftwareVersion: c.version, StartedUnixNano: c.started}
+	var hello any = protocol.ConnectorHello{ProtocolVersion: protocol.ProtocolVersion, ConnectorID: c.config.ConnectorID, Environment: c.config.Environment, Routes: routes, SoftwareVersion: c.version, StartedUnixNano: c.started}
+	if c.config.RegistrationMode == "dynamic" {
+		hello = protocol.ConnectorHelloV3{ProtocolVersion: protocol.ProtocolVersionV3, ProjectID: c.config.ProjectID, EnvironmentID: c.config.EnvironmentID, IdentityKeyID: c.config.IdentityKeyID, Routes: routes, SoftwareVersion: c.version, StartedUnixNano: c.started}
+	}
 	if err := protocol.WriteFrame(control, hello); err != nil {
 		return err
 	}
@@ -153,11 +156,15 @@ func (c *Client) serve(ctx context.Context, conn *quic.Conn) error {
 func (c *Client) validateAccepted(accepted protocol.ConnectorAccepted) error {
 	virtualPrefix, virtualErr := netip.ParsePrefix(accepted.VirtualPrefix)
 	realPrefix, realErr := netip.ParsePrefix(accepted.RealPrefix)
-	virtualBytes := c.config.VirtualPrefix.Addr().As16()
-	wantSlot := int(virtualBytes[1] - 0x20)
 	if accepted.ConnectorID != c.config.ConnectorID || virtualErr != nil || realErr != nil ||
-		virtualPrefix != c.config.VirtualPrefix || realPrefix != c.config.RealPrefix || accepted.Slot != wantSlot {
+		virtualPrefix != c.config.VirtualPrefix || realPrefix != c.config.RealPrefix {
 		return errors.New("the edge returned connector identity or prefix values that do not match the connector configuration")
+	}
+	if c.config.RegistrationMode != "dynamic" {
+		virtualBytes := c.config.VirtualPrefix.Addr().As16()
+		if accepted.Slot != int(virtualBytes[1]-0x20) {
+			return errors.New("the edge returned a slot that does not match the static connector configuration")
+		}
 	}
 	return nil
 }

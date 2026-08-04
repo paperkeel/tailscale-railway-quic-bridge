@@ -11,6 +11,7 @@ services:
       - /dev/net/tun:/dev/net/tun
     volumes:
       - /var/lib/tailbridge/tailscale:/var/lib/tailscale
+      - /var/lib/tailbridge/registry:/var/lib/tailbridge/registry
     restart: unless-stopped
     read_only: true
     tmpfs:

@@ -24,7 +24,7 @@ jobs:
       packages: write
       id-token: write
       attestations: write
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     strategy:
       fail-fast: false
       matrix:
@@ -50,12 +50,14 @@ jobs:
           file: Dockerfile.${{ matrix.component }}
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ghcr.io/bearfire-dev/tailscale-railway-quic-bridge-${{ matrix.component }}:sha-${{ env.SOURCE_COMMIT }}
+          tags: |
+            ghcr.io/bearfire-dev/tailscale-railway-quic-bridge-${{ matrix.component }}:sha-${{ env.SOURCE_COMMIT }}
+            ghcr.io/bearfire-dev/tailscale-railway-quic-bridge-${{ matrix.component }}:master
           build-args: VERSION=sha-${{ env.SOURCE_COMMIT }}
           provenance: mode=max
           sbom: true
           cache-from: type=gha,scope=master-${{ matrix.component }}
-          cache-to: type=gha,mode=max,scope=master-${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=master-${{ matrix.component }},ignore-error=true
       - name: Make the deployment image public
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -90,7 +92,7 @@ jobs:
     permissions:
       contents: read
       packages: write
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     env:
       NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       SOURCE_COMMIT: ${{ github.event.workflow_run.head_sha }}

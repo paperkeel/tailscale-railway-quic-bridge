@@ -11,6 +11,7 @@ export interface EdgeEnvironment {
 	environment: string;
 	connectors: Array<{
 		connectorId: string;
+		projectId: string;
 		environment: string;
 		slot: number;
 		virtualPrefix: string;
@@ -21,6 +22,19 @@ export interface EdgeEnvironment {
 	edgeCertB64: string;
 	edgeKeyB64: string;
 	tailscaleAuthKey: string;
+	registration?: {
+		frozen: boolean;
+		newProjectsFrozen?: boolean;
+		allowedProjectIds?: string[];
+		virtualNetwork: string;
+		excludedPrefixes?: string[];
+		oidcPolicies: unknown[];
+		approvalTailscaleTags?: string[];
+		edgeTailscaleTag?: string;
+		leases?: { preview?: string; persistent?: string; quarantine?: string };
+		intermediateCertB64: string;
+		intermediateKeyB64: string;
+	};
 }
 
 export function renderCloudInit(): string {
@@ -54,8 +68,6 @@ export function renderEdgeEnvironment(environment: EdgeEnvironment): string {
 	const values: Record<string, string> = {
 		TB_EDGE_ID: environment.edgeId,
 		TB_ENVIRONMENT: environment.environment,
-		TB_ALLOWED_ROUTES: routes,
-		TB_CONNECTORS_B64: connectors,
 		TB_QUIC_LISTEN_ADDR: ":4433",
 		TB_TCP_LISTEN_ADDR: "[::]:15001",
 		TB_UDP_LISTEN_ADDR: "[::]:15002",
@@ -68,8 +80,49 @@ export function renderEdgeEnvironment(environment: EdgeEnvironment): string {
 		TS_STATE_DIR: "/var/lib/tailscale",
 		TS_AUTH_ONCE: "true",
 		TS_USERSPACE: "false",
-		TS_EXTRA_ARGS: `--advertise-routes=${routes} --advertise-tags=tag:tailbridge`,
+		TS_EXTRA_ARGS: environment.registration
+			? `--advertise-tags=${environment.registration.edgeTailscaleTag ?? "tag:tailbridge"}`
+			: `--advertise-routes=${routes} --advertise-tags=tag:tailbridge`,
 	};
+	if (environment.connectors.length) {
+		values.TB_CONNECTORS_B64 = connectors;
+	}
+	if (environment.registration) {
+		Object.assign(values, {
+			TB_REGISTRATION_MODE: environment.connectors.length
+				? "migration"
+				: "dynamic",
+			TB_REGISTRATION_FROZEN: String(environment.registration.frozen),
+			TB_NEW_PROJECTS_FROZEN: String(
+				environment.registration.newProjectsFrozen ?? true,
+			),
+			TB_ALLOWED_PROJECT_IDS_B64: Buffer.from(
+				JSON.stringify(environment.registration.allowedProjectIds ?? []),
+				"utf8",
+			).toString("base64"),
+			TB_VIRTUAL_NETWORK: environment.registration.virtualNetwork,
+			TB_EXCLUDED_PREFIXES: (
+				environment.registration.excludedPrefixes ?? ["fd12::/16"]
+			).join(","),
+			TB_OIDC_POLICIES_B64: Buffer.from(
+				JSON.stringify(environment.registration.oidcPolicies),
+				"utf8",
+			).toString("base64"),
+			TB_APPROVAL_TAILSCALE_TAGS: (
+				environment.registration.approvalTailscaleTags ?? ["tag:tailbridge-ci"]
+			).join(","),
+			TB_PREVIEW_LEASE: environment.registration.leases?.preview ?? "24h",
+			TB_PERSISTENT_LEASE:
+				environment.registration.leases?.persistent ?? "720h",
+			TB_SLOT_QUARANTINE: environment.registration.leases?.quarantine ?? "24h",
+			TB_REGISTRATION_LISTEN_ADDR: ":4434",
+			TB_APPROVAL_LISTEN_ADDR: "tailscale0:9443",
+			TB_DNS_LISTEN_ADDR: "tailscale0:53",
+			TB_REGISTRY_PATH: "/var/lib/tailbridge/registry/tailbridge.db",
+			TB_INTERMEDIATE_CERT_B64: environment.registration.intermediateCertB64,
+			TB_INTERMEDIATE_KEY_B64: environment.registration.intermediateKeyB64,
+		});
+	}
 
 	return `${Object.entries(values)
 		.map(([name, value]) => `${name}=${environmentValue(value)}`)
@@ -106,10 +159,7 @@ export function edgeImageReference(image: string): string {
 		throw new Error("The edge image reference must not contain whitespace.");
 	}
 	const repositoryAndTag = image.split("@", 1)[0];
-	if (
-		repositoryAndTag === "latest" ||
-		repositoryAndTag.endsWith(":latest")
-	) {
+	if (repositoryAndTag === "latest" || repositoryAndTag.endsWith(":latest")) {
 		throw new Error("The edge image reference must not use the latest tag.");
 	}
 	if (image.startsWith("sha256:")) {

@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   infra:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -25,7 +25,7 @@ jobs:
       - run: pnpm test:infra
 
   audit:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -38,7 +38,7 @@ jobs:
       - run: make GO=go GOFMT=gofmt coverage
 
   containers:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     strategy:
       matrix:
         component: [edge, connector, cli]
@@ -55,7 +55,7 @@ jobs:
           load: true
           tags: tailbridge-${{ matrix.component }}:ci
           cache-from: type=gha,scope=${{ matrix.component }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component }},ignore-error=true
       - name: Run the CLI smoke test
         if: matrix.component == 'cli'
         run: docker run --rm tailbridge-cli:ci version

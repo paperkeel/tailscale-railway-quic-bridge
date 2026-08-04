@@ -41,11 +41,10 @@ beforeAll(() => {
 describe("createCertificates", () => {
 	it("creates role-specific TLS credentials and an SSH key", async () => {
 		const outputs = await pulumi.runtime.runInPulumiStack(async () => {
-			const certificates = createCertificates(
-				"Tailbridge",
-				"shared-edge",
-				["api", "admin"],
-			);
+			const certificates = createCertificates("Tailbridge", "shared-edge", [
+				"api",
+				"admin",
+			]);
 			const api = certificates.connectors.get("api");
 			if (!api) throw new Error("The API certificate does not exist.");
 			return {
@@ -73,8 +72,7 @@ describe("createCertificates", () => {
 		const ca = resource("Tailbridge-ca");
 		expect(ca.inputs).toMatchObject({
 			isCaCertificate: true,
-			validityPeriodHours: 87_600,
-			earlyRenewalHours: 720,
+			validityPeriodHours: 8_760,
 			allowedUses: ["cert_signing", "digital_signature"],
 		});
 
@@ -86,9 +84,11 @@ describe("createCertificates", () => {
 		expect(connectorRequest.inputs).toMatchObject({
 			uris: ["spiffe://tailbridge.local/connector/api"],
 		});
-		expect(resource("Tailbridge-connector-admin-request").inputs).toMatchObject({
-			uris: ["spiffe://tailbridge.local/connector/admin"],
-		});
+		expect(resource("Tailbridge-connector-admin-request").inputs).toMatchObject(
+			{
+				uris: ["spiffe://tailbridge.local/connector/admin"],
+			},
+		);
 
 		const edgeCertificate = resource("Tailbridge-edge-certificate");
 		expect(edgeCertificate.inputs).toMatchObject({
@@ -96,7 +96,9 @@ describe("createCertificates", () => {
 			earlyRenewalHours: 720,
 			allowedUses: ["digital_signature", "server_auth"],
 		});
-		const connectorCertificate = resource("Tailbridge-connector-api-certificate");
+		const connectorCertificate = resource(
+			"Tailbridge-connector-api-certificate",
+		);
 		expect(connectorCertificate.inputs).toMatchObject({
 			allowedUses: ["digital_signature", "client_auth"],
 		});

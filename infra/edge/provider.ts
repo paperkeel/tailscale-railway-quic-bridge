@@ -4,12 +4,15 @@ export interface EdgeCertificates {
 	caCertB64: pulumi.Input<string>;
 	edgeCertB64: pulumi.Input<string>;
 	edgeKeyB64: pulumi.Input<string>;
+	intermediateCertB64?: pulumi.Input<string>;
+	intermediateKeyB64?: pulumi.Input<string>;
 	sshPublicKey: pulumi.Input<string>;
 	sshPrivateKey: pulumi.Input<string>;
 }
 
 export interface EdgeConnectorConfig {
 	connectorId: string;
+	projectId: pulumi.Input<string>;
 	environment: pulumi.Input<string>;
 	slot: number;
 	virtualPrefix: string;
@@ -28,6 +31,17 @@ export interface EdgeDeploymentArgs {
 		sshSourceCidrs: string[];
 	};
 	connectors: EdgeConnectorConfig[];
+	registration?: {
+		frozen: boolean;
+		newProjectsFrozen?: boolean;
+		allowedProjectIds?: string[];
+		virtualNetwork?: string;
+		excludedPrefixes?: string[];
+		oidcPolicies: pulumi.Input<unknown[]>;
+		approvalTailscaleTags?: string[];
+		edgeTailscaleTag?: string;
+		leases?: { preview?: string; persistent?: string; quarantine?: string };
+	};
 	certificates: EdgeCertificates;
 	tailscaleAuthKey: pulumi.Input<string>;
 	parent: pulumi.ComponentResource;

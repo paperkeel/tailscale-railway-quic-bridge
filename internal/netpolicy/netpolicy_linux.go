@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -43,6 +44,7 @@ func (e *commandError) Unwrap() error {
 }
 
 type Policy struct {
+	mu      sync.Mutex
 	routes  []netip.Prefix
 	tcpPort string
 	udpPort string
@@ -62,6 +64,8 @@ func New(routes []netip.Prefix, tcpAddress, udpAddress string) (*Policy, error) 
 }
 
 func (p *Policy) Apply(ctx context.Context) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if err := p.cleanup(ctx); err != nil {
 		return fmt.Errorf("clean the existing network policy: %w", err)
 	}
@@ -79,6 +83,22 @@ func (p *Policy) Apply(ctx context.Context) error {
 		if err := p.run(ctx, "ip", []string{family, "route", "replace", "local", prefix, "dev", "lo", "table", routeTable}, ""); err != nil {
 			return p.rollback(ctx, fmt.Errorf("add the %s local route: %w", family, err))
 		}
+	}
+	return nil
+}
+
+// Replace atomically changes the nftables interception prefixes. The policy
+// routing rules do not change, so an unsuccessful replacement keeps the prior
+// nftables generation active.
+func (p *Policy) Replace(ctx context.Context, routes []netip.Prefix) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	previous := p.routes
+	p.routes = routes
+	rules := "delete table inet " + tableName + "\n" + p.rules()
+	if err := p.run(ctx, "nft", []string{"-f", "-"}, rules); err != nil {
+		p.routes = previous
+		return fmt.Errorf("replace nftables rules: %w", err)
 	}
 	return nil
 }
@@ -133,6 +153,8 @@ func (p *Policy) rules() string {
 }
 
 func (p *Policy) Close(ctx context.Context) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	cleanupContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
 	defer cancel()
 	if err := p.cleanup(cleanupContext); err != nil {
