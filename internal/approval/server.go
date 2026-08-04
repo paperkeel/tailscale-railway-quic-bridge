@@ -35,6 +35,8 @@ type Server struct {
 	status    *status.Server
 }
 
+var resolveApprovalAddress = interfaceAddress
+
 type approvalRequest struct {
 	RequestID         string `json:"requestId"`
 	ProviderID        string `json:"providerId"`
@@ -71,9 +73,30 @@ func NewServer(cfg config.Edge, store *registry.Store, logger *slog.Logger, metr
 }
 
 func (s *Server) Run(ctx context.Context) error {
-	address, err := interfaceAddress(s.config.ApprovalListenAddr)
-	if err != nil {
-		return err
+	waitContext, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	var address string
+	var err error
+	for {
+		address, err = resolveApprovalAddress(s.config.ApprovalListenAddr)
+		if err == nil {
+			break
+		}
+		host, _, splitErr := net.SplitHostPort(s.config.ApprovalListenAddr)
+		if splitErr != nil || host == "" {
+			return err
+		}
+		if _, parseErr := netip.ParseAddr(host); parseErr == nil {
+			return err
+		}
+		select {
+		case <-waitContext.Done():
+			if ctx.Err() != nil {
+				return nil
+			}
+			return fmt.Errorf("wait for approval listener address: %w", err)
+		case <-time.After(250 * time.Millisecond):
+		}
 	}
 	listener, err := net.Listen("tcp", address)
 	if err != nil {

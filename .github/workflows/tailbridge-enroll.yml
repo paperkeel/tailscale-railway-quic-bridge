@@ -13,28 +13,35 @@ on:
         required: true
         type: string
       service-id:
-        required: true
+        required: false
+        default: ""
         type: string
       project-alias:
-        required: true
+        required: false
+        default: ""
         type: string
       environment-alias:
-        required: true
+        required: false
+        default: ""
         type: string
       edge-id:
-        required: true
+        required: false
+        default: ""
         type: string
       edge-endpoint:
-        required: true
+        required: false
+        default: ""
         type: string
       registration-endpoint:
-        required: true
+        required: false
+        default: ""
         type: string
       approval-url:
         required: true
         type: string
       trust-bundle-b64:
-        required: true
+        required: false
+        default: ""
         type: string
       oidc-provider-id:
         required: false
@@ -54,7 +61,7 @@ on:
         type: string
     secrets:
       railway-token:
-        required: true
+        required: false
 
 permissions:
   contents: read
@@ -69,6 +76,14 @@ jobs:
         env:
           OPERATION: ${{ inputs.operation }}
           APPROVAL_URL: ${{ inputs.approval-url }}
+          SERVICE_ID: ${{ inputs.service-id }}
+          PROJECT_ALIAS: ${{ inputs.project-alias }}
+          ENVIRONMENT_ALIAS: ${{ inputs.environment-alias }}
+          EDGE_ID: ${{ inputs.edge-id }}
+          EDGE_ENDPOINT: ${{ inputs.edge-endpoint }}
+          REGISTRATION_ENDPOINT: ${{ inputs.registration-endpoint }}
+          TRUST_BUNDLE_B64: ${{ inputs.trust-bundle-b64 }}
+          RAILWAY_TOKEN: ${{ secrets.railway-token }}
         run: |
           case "$OPERATION" in
             enroll|revoke) ;;
@@ -78,6 +93,14 @@ jobs:
             http://*|https://*) ;;
             *) echo 'approval-url must use HTTP or HTTPS.' >&2; exit 1 ;;
           esac
+          if [[ "$OPERATION" == enroll ]]; then
+            for name in SERVICE_ID PROJECT_ALIAS ENVIRONMENT_ALIAS EDGE_ID EDGE_ENDPOINT REGISTRATION_ENDPOINT TRUST_BUNDLE_B64 RAILWAY_TOKEN; do
+              if [[ -z "${!name}" ]]; then
+                echo "$name is required for enrollment." >&2
+                exit 1
+              fi
+            done
+          fi
 
       - name: Join the tailnet
         uses: tailscale/github-action@306e68a486fd2350f2bfc3b19fcd143891a4a2d8 # v4
@@ -95,7 +118,7 @@ jobs:
           PROVIDER_ID: ${{ inputs.oidc-provider-id }}
           OIDC_AUDIENCE: ${{ inputs.oidc-audience }}
         run: |
-          oidc_response=$(curl --connect-timeout 10 --max-time 30 --fail --silent --show-error --header "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${OIDC_AUDIENCE}")
+          oidc_response=$(curl --connect-timeout 10 --max-time 30 --fail --silent --show-error --get --header "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" --data-urlencode "audience=$OIDC_AUDIENCE" "$ACTIONS_ID_TOKEN_REQUEST_URL")
           token=$(jq -er '.value' <<<"$oidc_response")
           payload=$(jq -cn --arg projectId "$PROJECT_ID" --arg environmentId "$ENVIRONMENT_ID" --arg providerId "$PROVIDER_ID" --arg oidcToken "$token" '{projectId:$projectId,environmentId:$environmentId,providerId:$providerId,oidcToken:$oidcToken}')
           curl --connect-timeout 10 --max-time 30 --fail --silent --show-error --request POST --header 'Content-Type: application/json' --data "$payload" "$APPROVAL_URL/v1/revoke"
@@ -167,7 +190,7 @@ jobs:
           PROVIDER_ID: ${{ inputs.oidc-provider-id }}
           OIDC_AUDIENCE: ${{ inputs.oidc-audience }}
         run: |
-          oidc_response=$(curl --connect-timeout 10 --max-time 30 --fail --silent --show-error --header "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${OIDC_AUDIENCE}")
+          oidc_response=$(curl --connect-timeout 10 --max-time 30 --fail --silent --show-error --get --header "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" --data-urlencode "audience=$OIDC_AUDIENCE" "$ACTIONS_ID_TOKEN_REQUEST_URL")
           token=$(jq -er '.value' <<<"$oidc_response")
           request_id=$(jq -er '.requestId' "$RUNNER_TEMP/tailbridge-pending.json")
           fingerprint=$(jq -er '.publicFingerprint' "$RUNNER_TEMP/tailbridge-pending.json")

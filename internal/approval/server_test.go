@@ -12,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"log/slog"
 	"math/big"
 	"net/http"
@@ -84,6 +85,33 @@ func TestApprovalServerRunsAndStops(t *testing.T) {
 	server := &Server{config: config.Edge{ApprovalListenAddr: "127.0.0.1:0"}, logger: slog.Default()}
 	if err := server.Run(ctx); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestApprovalServerWaitsForInterface(t *testing.T) {
+	original := resolveApprovalAddress
+	defer func() { resolveApprovalAddress = original }()
+	ready := make(chan struct{})
+	calls := 0
+	resolveApprovalAddress = func(string) (string, error) {
+		calls++
+		if calls == 1 {
+			return "", errors.New("interface is not ready")
+		}
+		close(ready)
+		return "127.0.0.1:0", nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	server := &Server{config: config.Edge{ApprovalListenAddr: "tailscale0:9443"}, logger: slog.Default()}
+	go func() { done <- server.Run(ctx) }()
+	<-ready
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("approval address attempts = %d", calls)
 	}
 }
 
