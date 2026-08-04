@@ -30,6 +30,7 @@ export default $config({
 		const environmentId = required("RAILWAY_ENVIRONMENT_ID");
 		const stage = $app.stage;
 		const connectorName = process.env.TAILBRIDGE_CONNECTOR_ID?.trim() || stage;
+		const edgeId = process.env.TAILBRIDGE_EDGE_ID?.trim() || connectorName;
 		const image = process.env.TAILBRIDGE_IMAGE?.trim();
 		const images = image
 			? {
@@ -39,7 +40,7 @@ export default $config({
 			: undefined;
 		const tailbridge = new Tailbridge("Tailbridge", {
 			stage,
-			edgeId: connectorName,
+			edgeId,
 			edge: {
 				provider: "digitalocean",
 				region: process.env.DIGITALOCEAN_REGION?.trim() || "nyc3",
@@ -85,7 +86,13 @@ function required(name: string): string {
 
 function imageReference(component: "edge" | "connector", image: string): string {
 	const repository = `ghcr.io/bearfire-dev/tailscale-railway-quic-bridge-${component}`;
-	return image.startsWith("sha256:")
-		? `${repository}@${image}`
-		: `${repository}:${image}`;
+	if (/^sha256:[0-9a-f]{64}$/.test(image)) {
+		return `${repository}@${image}`;
+	}
+	if (/^sha-[0-9a-f]{40}$/.test(image)) {
+		return `${repository}:${image}`;
+	}
+	throw new Error(
+		"TAILBRIDGE_IMAGE must be a sha-<full-commit-sha> tag or a sha256 digest.",
+	);
 }

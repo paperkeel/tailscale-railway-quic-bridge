@@ -32,7 +32,10 @@ export function createRailwayConnector(
 	args: RailwayConnectorArgs,
 ): RailwayConnectorOutputs {
 	const { target } = args;
-	const childOptions = { parent: args.parent };
+	const childOptions: pulumi.CustomResourceOptions = {
+		parent: args.parent,
+		dependsOn: args.edge.ready,
+	};
 	const projectId = pulumi.output(target.projectId);
 	const environmentId = pulumi.output(target.environmentId);
 	const resourceName = `${args.name}-connector-${target.slot}`;
@@ -60,7 +63,7 @@ export function createRailwayConnector(
 			variables: [
 				{ name: "TB_CONNECTOR_ID", value: target.name },
 				{ name: "TB_EDGE_ID", value: args.edgeId },
-				{ name: "TB_ENVIRONMENT", value: args.stage },
+				{ name: "TB_ENVIRONMENT", value: environmentId },
 				{
 					name: "TB_EDGE_ENDPOINT",
 					value: pulumi.interpolate`${args.edge.ipv4}:4433`,

@@ -37,6 +37,11 @@ export function edgeFirewallRules(
 				portRange: "4433",
 				sourceAddresses: ["0.0.0.0/0", "::/0"],
 			},
+			{
+				protocol: "udp",
+				portRange: "4434",
+				sourceAddresses: ["0.0.0.0/0", "::/0"],
+			},
 		],
 		outboundRules: [
 			{
@@ -61,13 +66,26 @@ export function createDigitalOceanEdge(
 	args: EdgeDeploymentArgs,
 ): EdgeDeployment {
 	const { certificates, tailscaleAuthKey } = args;
+	if (
+		args.registration &&
+		(certificates.intermediateCertB64 === undefined ||
+			certificates.intermediateKeyB64 === undefined)
+	) {
+		throw new Error(
+			"registration requires intermediateCertB64 and intermediateKeyB64.",
+		);
+	}
 	const resourceName = physicalName(args.edgeId, 48);
 	const childOptions = { parent: args.parent };
 
-	const sshKey = new digitalocean.SshKey(`${args.name}-edge-ssh-key`, {
-		name: `${resourceName}-ssh`,
-		publicKey: certificates.sshPublicKey,
-	}, childOptions);
+	const sshKey = new digitalocean.SshKey(
+		`${args.name}-edge-ssh-key`,
+		{
+			name: `${resourceName}-ssh`,
+			publicKey: certificates.sshPublicKey,
+		},
+		childOptions,
+	);
 
 	const volume = new digitalocean.Volume(
 		`${args.name}-edge-state`,
@@ -82,32 +100,54 @@ export function createDigitalOceanEdge(
 		{ ...edgeVolumeResourceOptions, ...childOptions },
 	);
 
-	const droplet = new digitalocean.Droplet(`${args.name}-edge-host`, {
-		name: resourceName,
-		image: "ubuntu-24-04-x64",
-		region: args.edge.region,
-		size: args.edge.size,
-		sshKeys: [sshKey.fingerprint],
-		ipv6: true,
-		monitoring: true,
-		gracefulShutdown: true,
-		userData: renderCloudInit(),
-		tags: ["tailbridge", resourceName],
-	}, childOptions);
+	const droplet = new digitalocean.Droplet(
+		`${args.name}-edge-host`,
+		{
+			name: resourceName,
+			image: "ubuntu-24-04-x64",
+			region: args.edge.region,
+			size: args.edge.size,
+			sshKeys: [sshKey.fingerprint],
+			ipv6: true,
+			monitoring: true,
+			gracefulShutdown: true,
+			userData: renderCloudInit(),
+			tags: ["tailbridge", resourceName],
+		},
+		childOptions,
+	);
+	const reservedIp = new digitalocean.ReservedIp(
+		`${args.name}-edge-ipv4`,
+		{ region: args.edge.region },
+		{ ...edgeVolumeResourceOptions, ...childOptions },
+	);
+	const reservedIpAssignment = new digitalocean.ReservedIpAssignment(
+		`${args.name}-edge-ipv4-assignment`,
+		{ dropletId: droplet.id.apply(Number), ipAddress: reservedIp.ipAddress },
+		childOptions,
+	);
 
-	const firewall = new digitalocean.Firewall(`${args.name}-edge-firewall`, {
-		name: `${resourceName}-firewall`,
-		dropletIds: [droplet.id.apply(Number)],
-		...edgeFirewallRules(args.edge.sshSourceCidrs),
-	}, childOptions);
+	const firewall = new digitalocean.Firewall(
+		`${args.name}-edge-firewall`,
+		{
+			name: `${resourceName}-firewall`,
+			dropletIds: [droplet.id.apply(Number)],
+			...edgeFirewallRules(args.edge.sshSourceCidrs),
+		},
+		childOptions,
+	);
 
-	const attachment = new digitalocean.VolumeAttachment(`${args.name}-edge-state-attachment`, {
-		dropletId: droplet.id.apply(Number),
-		volumeId: volume.id,
-	}, childOptions);
+	const attachment = new digitalocean.VolumeAttachment(
+		`${args.name}-edge-state-attachment`,
+		{
+			dropletId: droplet.id.apply(Number),
+			volumeId: volume.id,
+		},
+		childOptions,
+	);
 
 	const connection: command.types.input.remote.ConnectionArgs = {
-		host: droplet.ipv4Address,
+		host: reservedIp.ipAddress,
 		user: "root",
 		privateKey: certificates.sshPrivateKey,
 		dialErrorLimit: 30,
@@ -122,27 +162,66 @@ export function createDigitalOceanEdge(
 			update: prepareCommand(volume.name),
 			triggers: [volume.id, droplet.id],
 		},
-		{ parent: args.parent, dependsOn: [attachment, firewall] },
+		{
+			parent: args.parent,
+			dependsOn: [attachment, firewall, reservedIpAssignment],
+		},
 	);
 
 	const compose = renderCompose(args.image);
 	const environment = pulumi
-		.all([
-			certificates.caCertB64,
-			certificates.edgeCertB64,
-			certificates.edgeKeyB64,
-			tailscaleAuthKey,
-		])
-		.apply(([caCertB64, edgeCertB64, edgeKeyB64, authKey]) =>
-			renderEdgeEnvironment({
-				edgeId: args.edgeId,
-				environment: args.stage,
-				connectors: args.connectors,
+		.all({
+			caCertB64: certificates.caCertB64,
+			edgeCertB64: certificates.edgeCertB64,
+			edgeKeyB64: certificates.edgeKeyB64,
+			intermediateCertB64: certificates.intermediateCertB64 ?? "",
+			intermediateKeyB64: certificates.intermediateKeyB64 ?? "",
+			authKey: tailscaleAuthKey,
+			oidcPolicies: pulumi.output(args.registration?.oidcPolicies ?? []),
+			connectorIdentities: pulumi.all(
+				args.connectors.map((connector) =>
+					pulumi.all([
+						connector.projectId,
+						connector.environment,
+						connector.environmentName,
+					]),
+				),
+			),
+		})
+		.apply(
+			({
 				caCertB64,
 				edgeCertB64,
 				edgeKeyB64,
-				tailscaleAuthKey: authKey,
-			}),
+				intermediateCertB64,
+				intermediateKeyB64,
+				authKey,
+				oidcPolicies,
+				connectorIdentities,
+			}) =>
+				renderEdgeEnvironment({
+					edgeId: args.edgeId,
+					environment: args.stage,
+					connectors: args.connectors.map((connector, index) => ({
+						...connector,
+						projectId: String(connectorIdentities[index][0]),
+						environment: String(connectorIdentities[index][1]),
+						environmentName: String(connectorIdentities[index][2]),
+					})),
+					caCertB64: String(caCertB64),
+					edgeCertB64: String(edgeCertB64),
+					edgeKeyB64: String(edgeKeyB64),
+					tailscaleAuthKey: String(authKey),
+					registration: args.registration
+						? {
+								...args.registration,
+								virtualNetwork: args.registration.virtualNetwork ?? "fd40::/10",
+								oidcPolicies: oidcPolicies as unknown[],
+								intermediateCertB64: String(intermediateCertB64),
+								intermediateKeyB64: String(intermediateKeyB64),
+							}
+						: undefined,
+				}),
 		);
 
 	const composeUpload = new command.remote.CopyToRemote(
@@ -156,12 +235,13 @@ export function createDigitalOceanEdge(
 		{ parent: args.parent, dependsOn: prepare },
 	);
 
-	const environmentUpload = new command.remote.CopyToRemote(
+	const environmentUpload = new command.remote.Command(
 		`${args.name}-edge-environment`,
 		{
 			connection,
-			remotePath: `${deploymentDirectory}/edge.env`,
-			source: environment.apply((value) => new pulumi.asset.StringAsset(value)),
+			create: installEnvironmentCommand,
+			update: installEnvironmentCommand,
+			stdin: environment,
 			triggers: [environment.apply((value) => deploymentHash(value))],
 		},
 		{ parent: args.parent, dependsOn: prepare },
@@ -182,12 +262,12 @@ export function createDigitalOceanEdge(
 	);
 
 	return {
-		ipv4: droplet.ipv4Address,
+		ipv4: reservedIp.ipAddress,
 		ipv6: droplet.ipv6Address,
 		hostId: droplet.id,
 		ready: deploy,
-		statusCommand: pulumi.interpolate`ssh root@${droplet.ipv4Address} 'docker compose -f /opt/tailbridge/compose.yml ps'`,
-		logsCommand: pulumi.interpolate`ssh root@${droplet.ipv4Address} 'docker compose -f /opt/tailbridge/compose.yml logs edge'`,
+		statusCommand: pulumi.interpolate`ssh root@${reservedIp.ipAddress} 'docker compose -f /opt/tailbridge/compose.yml ps'`,
+		logsCommand: pulumi.interpolate`ssh root@${reservedIp.ipAddress} 'docker compose -f /opt/tailbridge/compose.yml logs edge'`,
 	};
 }
 
@@ -200,9 +280,14 @@ function physicalName(stage: string, maximumLength = 63): string {
 	return normalized.slice(0, maximumLength).replace(/-$/g, "");
 }
 
-function prepareCommand(volumeName: pulumi.Output<string>): pulumi.Output<string> {
-	return volumeName.apply(
-		(name) => `set -eu
+function prepareCommand(
+	volumeName: pulumi.Output<string>,
+): pulumi.Output<string> {
+	return volumeName.apply(prepareScript);
+}
+
+export function prepareScript(name: string): string {
+	return `set -eu
 cloud-init status --wait
 device=/dev/disk/by-id/scsi-0DO_Volume_${name}
 for attempt in $(seq 1 60); do
@@ -217,10 +302,22 @@ fi
 if ! grep -Fq "LABEL=${volumeLabel} ${stateDirectory} ext4 defaults,nofail 0 2" /etc/fstab; then
   printf '%s\n' "LABEL=${volumeLabel} ${stateDirectory} ext4 defaults,nofail 0 2" >> /etc/fstab
 fi
-install -d -m 0700 ${stateDirectory}/tailscale ${deploymentDirectory}
-`,
-	);
+install -d -m 0700 ${stateDirectory}/tailscale ${stateDirectory}/registry ${deploymentDirectory}
+if test -e ${deploymentDirectory}/edge.env; then
+  chmod 0600 ${deploymentDirectory}/edge.env
+fi
+`;
 }
+
+const installEnvironmentCommand = `set -eu
+umask 077
+temporary=$(mktemp ${deploymentDirectory}/edge.env.XXXXXX)
+trap 'rm -f "$temporary"' EXIT
+cat > "$temporary"
+chmod 0600 "$temporary"
+mv -f "$temporary" ${deploymentDirectory}/edge.env
+trap - EXIT
+`;
 
 const deployCommand = `set -eu
 chmod 0600 ${deploymentDirectory}/edge.env

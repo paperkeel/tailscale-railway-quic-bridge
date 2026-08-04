@@ -1,0 +1,7 @@
+[deploy]
+healthcheckPath = "/readyz"
+healthcheckTimeout = 1800
+restartPolicyType = "ALWAYS"
+restartPolicyMaxRetries = 10
+overlapSeconds = 0
+drainingSeconds = 15

@@ -9,10 +9,50 @@ import (
 )
 
 const (
-	ALPN            = "tailbridge/2"
-	MaxControlFrame = 64 * 1024
-	ProtocolVersion = "2.0"
+	ALPN              = "tailbridge/2"
+	ALPNV3            = "tailbridge/3"
+	RegistrationALPN  = "tailbridge-register/1"
+	MaxControlFrame   = 64 * 1024
+	ProtocolVersion   = "2.0"
+	ProtocolVersionV3 = "3.0"
 )
+
+type RegistrationRequest struct {
+	RequestID        string `json:"request_id"`
+	Kind             string `json:"kind"`
+	ProjectID        string `json:"project_id"`
+	EnvironmentID    string `json:"environment_id"`
+	EnvironmentName  string `json:"environment_name"`
+	DeploymentID     string `json:"deployment_id"`
+	ProjectAlias     string `json:"project_alias"`
+	EnvironmentAlias string `json:"environment_alias"`
+	IdentityKey      []byte `json:"identity_key"`
+	TransportKey     []byte `json:"transport_key"`
+	Proof            []byte `json:"proof"`
+}
+
+type RegistrationResponse struct {
+	RequestID      string `json:"request_id"`
+	State          string `json:"state"`
+	ErrorCode      string `json:"error_code,omitempty"`
+	RetryAfterMS   int64  `json:"retry_after_ms,omitempty"`
+	VirtualPrefix  string `json:"virtual_prefix,omitempty"`
+	RealPrefix     string `json:"real_prefix,omitempty"`
+	DNSSuffix      string `json:"dns_suffix,omitempty"`
+	CertificatePEM []byte `json:"certificate_pem,omitempty"`
+	CertificateEnd int64  `json:"certificate_end,omitempty"`
+	LeaseExpiresAt int64  `json:"lease_expires_at,omitempty"`
+}
+
+type ConnectorHelloV3 struct {
+	ProtocolVersion string   `json:"protocol_version"`
+	ProjectID       string   `json:"project_id"`
+	EnvironmentID   string   `json:"environment_id"`
+	IdentityKeyID   string   `json:"identity_key_id"`
+	Routes          []string `json:"routes"`
+	SoftwareVersion string   `json:"software_version"`
+	StartedUnixNano int64    `json:"started_unix_nano"`
+}
 
 type ConnectorHello struct {
 	ProtocolVersion string   `json:"protocol_version"`

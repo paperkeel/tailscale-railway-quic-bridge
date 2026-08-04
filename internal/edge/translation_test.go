@@ -58,6 +58,10 @@ func TestRouteSelectsConnectorAndTranslatesDestination(t *testing.T) {
 	if _, _, ok := server.route(netip.MustParseAddrPort("[fd22::1]:443")); ok {
 		t.Fatal("route() accepted an unconfigured virtual prefix")
 	}
+	server.session.Store(&session{id: "compatibility", routes: []netip.Prefix{netip.MustParsePrefix("fd22::/16")}})
+	if _, _, ok := server.route(netip.MustParseAddrPort("[fd22::1]:443")); ok {
+		t.Fatal("route() used the compatibility session for an unconfigured virtual prefix")
+	}
 }
 
 func TestTranslateAddrPortPreservesPort(t *testing.T) {

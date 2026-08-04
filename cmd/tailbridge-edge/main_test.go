@@ -48,7 +48,6 @@ func setValidEdgeEnvironment(t *testing.T, adminAddress string) {
 		"TB_MTLS_CERT_B64":            certificate,
 		"TB_MTLS_KEY_B64":             key,
 		"TB_ADMIN_LISTEN_ADDR":        adminAddress,
-		"TB_ALLOWED_ROUTES":           "127.0.0.0/8",
 		"TB_MANAGE_TAILSCALE":         "false",
 		"OTEL_EXPORTER_OTLP_ENDPOINT": "",
 		"SENTRY_DSN":                  "",

@@ -11,6 +11,7 @@ export interface TailbridgeConnectorTarget {
 	slot: number;
 	projectId: pulumi.Input<string>;
 	environmentId: pulumi.Input<string>;
+	environmentName?: pulumi.Input<string>;
 	region?: string;
 	realPrefix?: string;
 }
@@ -25,7 +26,18 @@ export interface TailbridgeArgs {
 		size: string;
 		sshSourceCidrs: string[];
 	};
-	connectors: TailbridgeConnectorTarget[];
+	connectors?: TailbridgeConnectorTarget[];
+	registration?: {
+		frozen: boolean;
+		newProjectsFrozen?: boolean;
+		allowedProjectIds?: string[];
+		virtualNetwork?: string;
+		excludedPrefixes?: string[];
+		oidcPolicies: pulumi.Input<unknown[]>;
+		approvalTailscaleTags?: string[];
+		edgeTailscaleTag?: string;
+		leases?: { preview?: string; persistent?: string; quarantine?: string };
+	};
 	tailscaleAuthKey: pulumi.Input<string>;
 	images?: {
 		edge?: string;
@@ -83,12 +95,15 @@ export class Tailbridge extends pulumi.ComponentResource {
 			edge: normalized.edge,
 			connectors: normalized.connectors.map((target) => ({
 				connectorId: target.name,
-				environment: normalized.stage,
+				projectId: target.projectId,
+				environment: target.environmentId,
+				environmentName: target.environmentName ?? target.name,
 				slot: target.slot,
 				virtualPrefix: target.virtualPrefix,
 				realPrefix: target.realPrefix,
 				dnsSuffix: target.dnsSuffix,
 			})),
+			registration: normalized.registration,
 			certificates,
 			tailscaleAuthKey: normalized.tailscaleAuthKey,
 			parent: this,
@@ -141,15 +156,17 @@ export class Tailbridge extends pulumi.ComponentResource {
 			)
 			.apply((connectors) => [...connectors]);
 		this.tailscaleRoutes = pulumi.output(
-			normalized.connectors.map((target) => target.virtualPrefix),
+			normalized.registration
+				? [normalized.virtualNetwork]
+				: normalized.connectors.map((target) => target.virtualPrefix),
 		);
 		this.tailscalePolicyFragment = this.tailscaleRoutes.apply((routes) => {
+			const edgeTag =
+				normalized.registration?.edgeTailscaleTag ?? "tag:tailbridge";
 			const fragment: TailscalePolicyFragment = {
-				tagOwners: { "tag:tailbridge": ["autogroup:admin"] },
+				tagOwners: { [edgeTag]: ["autogroup:admin"] },
 				autoApprovers: {
-					routes: Object.fromEntries(
-						routes.map((route) => [route, ["tag:tailbridge"]]),
-					),
+					routes: Object.fromEntries(routes.map((route) => [route, [edgeTag]])),
 				},
 			};
 			return fragment;
@@ -176,20 +193,33 @@ function resolveImages(
 	stage: string,
 	overrides: TailbridgeArgs["images"],
 ): { edge: string; connector: string } {
-	if (
-		tailbridgeBuild.sourceCommit === "development" &&
-		!overrides?.edge &&
-		!overrides?.connector &&
-		!isDevelopmentStage(stage)
-	) {
-		throw new Error(
-			"The development build metadata requires image overrides outside a development or test stage.",
-		);
-	}
-	return {
+	const images = {
 		edge: overrides?.edge ?? tailbridgeBuild.edgeImage,
 		connector: overrides?.connector ?? tailbridgeBuild.connectorImage,
 	};
+	if (
+		tailbridgeBuild.sourceCommit === "development" &&
+		!isDevelopmentStage(stage)
+	) {
+		throw new Error(
+			"A development package cannot deploy outside a development or test stage.",
+		);
+	}
+	if (!isDevelopmentStage(stage)) {
+		validateImmutableImage("edge", images.edge);
+		validateImmutableImage("connector", images.connector);
+	}
+	return images;
+}
+
+function validateImmutableImage(component: string, image: string): void {
+	const digest = /@sha256:[a-f0-9]{64}$/;
+	const commitTag = /:sha-[a-f0-9]{40}$/;
+	if (!digest.test(image) && !commitTag.test(image)) {
+		throw new Error(
+			`${component} image must use a SHA-256 digest or a full commit SHA tag.`,
+		);
+	}
 }
 
 function isDevelopmentStage(stage: string): boolean {

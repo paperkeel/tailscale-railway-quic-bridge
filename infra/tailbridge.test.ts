@@ -1,7 +1,8 @@
 import * as pulumi from "@pulumi/pulumi";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { Tailbridge } from "./tailbridge";
+import { normalizeTailbridgeArgs } from "./config";
 
 const resources: pulumi.runtime.MockResourceArgs[] = [];
 
@@ -16,6 +17,9 @@ beforeAll(() => {
 						ipv4Address: "203.0.113.10",
 						ipv6Address: "2001:db8::10",
 					});
+				}
+				if (args.type === "digitalocean:index/reservedIp:ReservedIp") {
+					Object.assign(state, { ipAddress: "203.0.113.10" });
 				}
 				if (args.type === "digitalocean:index/sshKey:SshKey") {
 					Object.assign(state, { fingerprint: "test-fingerprint" });
@@ -48,6 +52,93 @@ beforeAll(() => {
 });
 
 describe("Tailbridge", () => {
+	beforeEach(() => resources.splice(0));
+
+	it("accepts a configurable dynamic registration network", () => {
+		const normalized = normalizeTailbridgeArgs({
+				stage: "test",
+				edgeId: "shared-edge",
+				registration: {
+					frozen: false,
+					virtualNetwork: "fd40::/10",
+					oidcPolicies: [],
+				},
+				edge: {
+					provider: "digitalocean",
+					region: "nyc3",
+					size: "s-1vcpu-1gb",
+					sshSourceCidrs: ["192.0.2.0/24"],
+				},
+				connectors: [
+					{
+						name: "api",
+						slot: 0,
+						projectId: "api-project",
+						environmentId: "api-environment",
+					},
+				],
+				tailscaleAuthKey: pulumi.secret("secret-auth-key"),
+			});
+		expect(normalized.registration?.virtualNetwork).toBe("fd40::/10");
+	});
+
+	it("rejects migration slots outside the registration network", () => {
+		expect(() =>
+			normalizeTailbridgeArgs({
+				stage: "test",
+				edgeId: "shared-edge",
+				virtualNetwork: "fd40::/16",
+				registration: { frozen: false, oidcPolicies: [] },
+				edge: {
+					provider: "digitalocean",
+					region: "nyc3",
+					size: "s-1vcpu-1gb",
+					sshSourceCidrs: ["192.0.2.0/24"],
+				},
+				connectors: [
+					{
+						name: "api",
+						slot: 1,
+						projectId: "api-project",
+						environmentId: "api-environment",
+					},
+				],
+				tailscaleAuthKey: pulumi.secret("secret-auth-key"),
+			}),
+		).toThrow(/does not fit/);
+	});
+
+	it("rejects a development package in a production stage", () => {
+		expect(
+			() =>
+				new Tailbridge("Production", {
+					stage: "production",
+					edgeId: "shared-edge",
+					edge: {
+						provider: "digitalocean",
+						region: "nyc3",
+						size: "s-1vcpu-1gb",
+						sshSourceCidrs: ["192.0.2.0/24"],
+					},
+					connectors: [
+						{
+							name: "api",
+							slot: 0,
+							projectId: "api-project",
+							environmentId: "api-environment",
+						},
+					],
+					tailscaleAuthKey: pulumi.secret("secret-auth-key"),
+					images: {
+						edge: `example.com/edge@sha256:${"a".repeat(64)}`,
+						connector: `example.com/connector@sha256:${"b".repeat(64)}`,
+					},
+				}),
+		).toThrow(
+			"A development package cannot deploy outside a development or test stage.",
+		);
+	});
+
 	it("creates one edge and exposes safe outputs for multiple targets", async () => {
 		const outputs = await pulumi.runtime.runInPulumiStack(async () => {
 			const tailbridge = new Tailbridge("Tailbridge", {

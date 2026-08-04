@@ -47,6 +47,7 @@ func TestForwardTCPRewritesQueriesAndResponses(t *testing.T) {
 		done <- err
 	}()
 	go func() {
+		defer func() { _ = upstream.Close() }()
 		request, err := readTCPMessage(upstream)
 		if err != nil {
 			return
@@ -126,12 +127,138 @@ func TestResponseRestoresNamesTranslatesAAAAAndFiltersA(t *testing.T) {
 	if got := aaaa.AAAA.String(); got != "fd20:3456::42" {
 		t.Fatalf("AAAA = %s, want fd20:3456::42", got)
 	}
-	if aaaa.Hdr.Ttl != 73 || aaaa.Hdr.Name != "api.project.railway.internal." {
+	if aaaa.Hdr.Ttl != 60 || aaaa.Hdr.Name != "api.project.railway.internal." {
 		t.Fatalf("AAAA metadata = %+v", aaaa.Hdr)
 	}
 	cname, ok := response.Answer[1].(*dns.CNAME)
 	if !ok || cname.Hdr.Name != "alias.project.railway.internal." || cname.Target != "api.project.railway.internal." {
 		t.Fatalf("CNAME = %+v", response.Answer[1])
+	}
+}
+
+func TestResponseRewritesServiceBindingAddressHints(t *testing.T) {
+	rewriter := testRewriter(t)
+	message := new(dns.Msg)
+	message.SetQuestion("api.railway.internal.", dns.TypeHTTPS)
+	message.Answer = []dns.RR{&dns.HTTPS{SVCB: dns.SVCB{
+		Hdr:      dns.RR_Header{Name: "api.railway.internal.", Rrtype: dns.TypeHTTPS, Class: dns.ClassINET},
+		Priority: 1,
+		Target:   "target.railway.internal.",
+		Value: []dns.SVCBKeyValue{
+			&dns.SVCBMandatory{Code: []dns.SVCBKey{dns.SVCB_IPV4HINT, dns.SVCB_IPV6HINT}},
+			&dns.SVCBIPv4Hint{Hint: []net.IP{net.ParseIP("192.0.2.1")}},
+			&dns.SVCBIPv6Hint{Hint: []net.IP{net.ParseIP("fd12:3456::42"), net.ParseIP("2001:db8::1")}},
+		},
+	}}}
+	payload, err := message.Pack()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rewritten, err := rewriter.Response(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	https := unpack(t, rewritten).Answer[0].(*dns.HTTPS)
+	if https.Target != "target.project.railway.internal." {
+		t.Fatalf("target = %q", https.Target)
+	}
+	if len(https.Value) != 2 {
+		t.Fatalf("service binding values = %v, want mandatory and IPv6 hints", https.Value)
+	}
+	mandatory := https.Value[0].(*dns.SVCBMandatory)
+	if len(mandatory.Code) != 1 || mandatory.Code[0] != dns.SVCB_IPV6HINT {
+		t.Fatalf("mandatory keys = %v, want only ipv6hint", mandatory.Code)
+	}
+	hints := https.Value[1].(*dns.SVCBIPv6Hint).Hint
+	if len(hints) != 1 || hints[0].String() != "fd20:3456::42" {
+		t.Fatalf("IPv6 hints = %v", hints)
+	}
+}
+
+func TestForwardTCPPreservesResponseAfterClientHalfClose(t *testing.T) {
+	rewriter := testRewriter(t)
+	clientListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = clientListener.Close() }()
+	upstreamListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = upstreamListener.Close() }()
+
+	done := make(chan error, 1)
+	go func() {
+		proxyClient, acceptErr := clientListener.Accept()
+		if acceptErr != nil {
+			done <- acceptErr
+			return
+		}
+		var dialer net.Dialer
+		proxyUpstream, dialErr := dialer.DialContext(
+			t.Context(),
+			"tcp",
+			upstreamListener.Addr().String(),
+		)
+		if dialErr != nil {
+			done <- dialErr
+			return
+		}
+		_, _, forwardErr := rewriter.ForwardTCP(proxyClient, proxyUpstream)
+		done <- forwardErr
+	}()
+	go func() {
+		upstream, acceptErr := upstreamListener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer func() { _ = upstream.Close() }()
+		request, readErr := readTCPMessage(upstream)
+		if readErr != nil {
+			return
+		}
+		response := new(dns.Msg)
+		response.SetReply(request)
+		response.Answer = []dns.RR{&dns.AAAA{Hdr: dns.RR_Header{Name: request.Question[0].Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET}, AAAA: net.ParseIP("fd12::55")}}
+		time.Sleep(300 * time.Millisecond)
+		payload, packErr := response.Pack()
+		if packErr == nil {
+			_ = writeTCPMessage(upstream, payload)
+		}
+	}()
+
+	connection, err := net.DialTCP("tcp", nil, clientListener.Addr().(*net.TCPAddr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := new(dns.Msg)
+	query.SetQuestion("api.project.railway.internal.", dns.TypeAAAA)
+	payload, err := query.Pack()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeTCPMessage(connection, payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := connection.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	response, err := readTCPMessage(connection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := response.Answer[0].(*dns.AAAA).AAAA.String(); got != "fd20::55" {
+		t.Fatalf("AAAA = %s, want fd20::55", got)
+	}
+	_ = connection.Close()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ForwardTCP() did not stop")
 	}
 }
 

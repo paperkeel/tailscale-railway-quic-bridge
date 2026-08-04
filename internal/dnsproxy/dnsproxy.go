@@ -8,11 +8,16 @@ import (
 	"net"
 	"net/netip"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/miekg/dns"
 )
 
-const railwaySuffix = "railway.internal."
+const (
+	railwaySuffix      = "railway.internal."
+	tcpResponseTimeout = 10 * time.Second
+)
 
 type Rewriter struct {
 	realPrefix    netip.Prefix
@@ -88,6 +93,9 @@ func (r *Rewriter) rewriteRecords(records []dns.RR) []dns.RR {
 			continue
 		}
 		header := record.Header()
+		if header.Ttl > 60 {
+			header.Ttl = 60
+		}
 		if name, ok := replaceSuffix(header.Name, railwaySuffix, r.suffix); ok {
 			header.Name = name
 		}
@@ -127,9 +135,61 @@ func (r *Rewriter) rewriteRecord(record dns.RR) {
 		value.Replacement = r.responseName(value.Replacement)
 	case *dns.SVCB:
 		value.Target = r.responseName(value.Target)
+		value.Value = r.rewriteSVCBValues(value.Value)
 	case *dns.HTTPS:
 		value.Target = r.responseName(value.Target)
+		value.Value = r.rewriteSVCBValues(value.Value)
 	}
+}
+
+func (r *Rewriter) rewriteSVCBValues(values []dns.SVCBKeyValue) []dns.SVCBKeyValue {
+	result := values[:0]
+	for _, value := range values {
+		switch hint := value.(type) {
+		case *dns.SVCBIPv4Hint:
+			continue
+		case *dns.SVCBIPv6Hint:
+			addresses := hint.Hint[:0]
+			for _, address := range hint.Hint {
+				parsed, ok := netip.AddrFromSlice(address)
+				if !ok || !r.realPrefix.Contains(parsed) {
+					continue
+				}
+				bytes := parsed.As16()
+				virtual := r.virtualPrefix.Addr().As16()
+				bytes[0], bytes[1] = virtual[0], virtual[1]
+				addresses = append(addresses, net.IP(bytes[:]))
+			}
+			if len(addresses) == 0 {
+				continue
+			}
+			hint.Hint = addresses
+		}
+		result = append(result, value)
+	}
+	present := make(map[dns.SVCBKey]struct{}, len(result))
+	for _, value := range result {
+		present[value.Key()] = struct{}{}
+	}
+	reconciled := result[:0]
+	for _, value := range result {
+		mandatory, ok := value.(*dns.SVCBMandatory)
+		if !ok {
+			reconciled = append(reconciled, value)
+			continue
+		}
+		codes := mandatory.Code[:0]
+		for _, code := range mandatory.Code {
+			if _, exists := present[code]; exists {
+				codes = append(codes, code)
+			}
+		}
+		if len(codes) != 0 {
+			mandatory.Code = codes
+			reconciled = append(reconciled, mandatory)
+		}
+	}
+	return reconciled
 }
 
 func (r *Rewriter) responseName(name string) string {
@@ -156,6 +216,7 @@ func replaceSuffix(name, from, to string) (string, bool) {
 }
 
 func (r *Rewriter) ForwardTCP(client io.ReadWriteCloser, upstream net.Conn) (int64, int64, error) {
+	var draining atomic.Bool
 	type result struct {
 		query bool
 		bytes int64
@@ -164,16 +225,29 @@ func (r *Rewriter) ForwardTCP(client io.ReadWriteCloser, upstream net.Conn) (int
 	results := make(chan result, 2)
 	go func() {
 		count, err := r.forwardQueries(client, upstream)
+		closeWrite(upstream)
 		results <- result{query: true, bytes: count, err: err}
 	}()
 	go func() {
-		count, err := r.forwardResponses(upstream, client)
+		count, err := r.forwardResponses(upstream, client, func() {
+			if draining.Load() {
+				_ = upstream.SetReadDeadline(time.Now().Add(tcpResponseTimeout))
+			}
+		})
+		closeWrite(client)
 		results <- result{bytes: count, err: err}
 	}()
 	first := <-results
+	if transferError(first.err) != nil || !first.query {
+		_ = upstream.Close()
+		_ = client.Close()
+	} else {
+		draining.Store(true)
+		_ = upstream.SetReadDeadline(time.Now().Add(tcpResponseTimeout))
+	}
+	second := <-results
 	_ = upstream.Close()
 	_ = client.Close()
-	second := <-results
 	var sent, received int64
 	if first.query {
 		sent, received = first.bytes, second.bytes
@@ -181,6 +255,12 @@ func (r *Rewriter) ForwardTCP(client io.ReadWriteCloser, upstream net.Conn) (int
 		sent, received = second.bytes, first.bytes
 	}
 	return sent, received, errors.Join(transferError(first.err), transferError(second.err))
+}
+
+func closeWrite(connection any) {
+	if writer, ok := connection.(interface{ CloseWrite() error }); ok {
+		_ = writer.CloseWrite()
+	}
 }
 
 func transferError(err error) error {
@@ -211,7 +291,11 @@ func (r *Rewriter) forwardQueries(source io.Reader, destination io.Writer) (int6
 	}
 }
 
-func (r *Rewriter) forwardResponses(source io.Reader, destination io.Writer) (int64, error) {
+func (r *Rewriter) forwardResponses(
+	source io.Reader,
+	destination io.Writer,
+	refreshDeadline func(),
+) (int64, error) {
 	var count int64
 	for {
 		message, err := readTCPMessage(source)
@@ -227,6 +311,9 @@ func (r *Rewriter) forwardResponses(source io.Reader, destination io.Writer) (in
 			return count, err
 		}
 		count += int64(len(payload) + 2)
+		if refreshDeadline != nil {
+			refreshDeadline()
+		}
 	}
 }
 

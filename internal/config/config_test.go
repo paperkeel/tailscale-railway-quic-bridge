@@ -223,6 +223,40 @@ func TestDurationRejectsNonPositiveValue(t *testing.T) {
 	}
 }
 
+func TestBooleanAndVirtualNetworkValues(t *testing.T) {
+	t.Setenv("TEST_BOOLEAN", "")
+	if value, err := boolValue("TEST_BOOLEAN", true); err != nil || !value {
+		t.Fatalf("default boolValue() = %v, %v", value, err)
+	}
+	t.Setenv("TEST_BOOLEAN", "true")
+	if value, err := boolValue("TEST_BOOLEAN", false); err != nil || !value {
+		t.Fatalf("boolValue() = %v, %v", value, err)
+	}
+	t.Setenv("TEST_BOOLEAN", "invalid")
+	if _, err := boolValue("TEST_BOOLEAN", false); err == nil {
+		t.Fatal("boolValue() accepted an invalid value")
+	}
+	if network, err := virtualNetworkValue("fd40::/10"); err != nil || network != netip.MustParsePrefix("fd40::/10") {
+		t.Fatalf("virtualNetworkValue() = %v, %v", network, err)
+	}
+	for _, value := range []string{"2001:db8::/16", "fd40::/17"} {
+		if _, err := virtualNetworkValue(value); err == nil {
+			t.Fatalf("virtualNetworkValue() accepted %q", value)
+		}
+	}
+	if validDNSLabel("") || validDNSLabel("-invalid") || validDNSLabel("invalid-") || validDNSLabel(strings.Repeat("a", 64)) || !validDNSLabel("preview-1") {
+		t.Fatal("validDNSLabel() returned an unexpected result")
+	}
+	t.Setenv("TEST_LIST", base64.StdEncoding.EncodeToString([]byte(`["one","two"]`)))
+	if values, err := decodedStringList("TEST_LIST"); err != nil || len(values) != 2 {
+		t.Fatalf("decodedStringList() = %v, %v", values, err)
+	}
+	t.Setenv("TEST_LIST", "not-base64")
+	if _, err := decodedStringList("TEST_LIST"); err == nil {
+		t.Fatal("decodedStringList() accepted invalid base64")
+	}
+}
+
 func TestConnectorRejectsUnsafeNames(t *testing.T) {
 	for _, test := range []struct {
 		name  string
@@ -278,7 +312,6 @@ func setEdgeEnvironment(t *testing.T) {
 		"TB_MTLS_CA_B64":    encoded,
 		"TB_MTLS_CERT_B64":  encoded,
 		"TB_MTLS_KEY_B64":   encoded,
-		"TB_ALLOWED_ROUTES": "fd20::/11",
 		"TB_CONNECTORS_B64": base64.StdEncoding.EncodeToString([]byte(`[{"connectorId":"railway-production","environment":"production","slot":0,"virtualPrefix":"fd20::/16","realPrefix":"fd12::/16","dnsSuffix":"production.railway.internal"}]`)),
 	} {
 		t.Setenv(name, value)
@@ -331,6 +364,73 @@ func TestEdgeRejectsDuplicateConnectorSlots(t *testing.T) {
 	t.Setenv("TB_CONNECTORS_B64", base64.StdEncoding.EncodeToString([]byte(payload)))
 	if _, err := LoadEdge(); err == nil {
 		t.Fatal("LoadEdge() accepted duplicate connector slots")
+	}
+}
+
+func TestDynamicConfiguration(t *testing.T) {
+	setEdgeEnvironment(t)
+	encoded := base64.StdEncoding.EncodeToString([]byte("test"))
+	t.Setenv("TB_REGISTRATION_MODE", "dynamic")
+	t.Setenv("TB_CONNECTORS_B64", "")
+	t.Setenv("TB_OIDC_POLICIES_B64", base64.StdEncoding.EncodeToString([]byte(`[]`)))
+	t.Setenv("TB_INTERMEDIATE_CERT_B64", encoded)
+	t.Setenv("TB_INTERMEDIATE_KEY_B64", encoded)
+	t.Setenv("TB_ALLOWED_PROJECT_IDS_B64", base64.StdEncoding.EncodeToString([]byte(`["project"]`)))
+	edge, err := LoadEdge()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if edge.VirtualNetwork != netip.MustParsePrefix("fd40::/10") || len(edge.AllowedProjectIDs) != 1 || !edge.NewProjectsFrozen {
+		t.Fatalf("dynamic edge configuration = %+v", edge)
+	}
+	t.Setenv("TB_VIRTUAL_NETWORK", "fd12::/16")
+	if _, err := LoadEdge(); err == nil {
+		t.Fatal("LoadEdge() accepted a virtual network that overlaps Railway")
+	}
+	t.Setenv("TB_VIRTUAL_NETWORK", "fd40::/10")
+
+	for name, value := range map[string]string{
+		"TB_REGISTRATION_MODE":     "dynamic",
+		"TB_TRUST_BUNDLE_B64":      encoded,
+		"TB_EDGE_ID":               "edge-production",
+		"TB_EDGE_ENDPOINT":         "edge.example.com:4433",
+		"TB_REGISTRATION_ENDPOINT": "edge.example.com:4434",
+		"TB_ENROLLMENT_NONCE":      "nonce",
+		"RAILWAY_PROJECT_ID":       "project",
+		"RAILWAY_ENVIRONMENT_ID":   "environment",
+		"RAILWAY_ENVIRONMENT_NAME": "preview-1",
+		"RAILWAY_DEPLOYMENT_ID":    "deployment",
+		"TB_DNS_PROJECT_ALIAS":     "shop",
+		"TB_DNS_ENVIRONMENT_ALIAS": "pr-1",
+	} {
+		t.Setenv(name, value)
+	}
+	connector, err := LoadConnector()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if connector.ProjectID != "project" || connector.RealPrefix != netip.MustParsePrefix("fd12::/16") || connector.RegistrationEndpoint == "" {
+		t.Fatalf("dynamic connector configuration = %+v", connector)
+	}
+	for _, test := range []struct {
+		name  string
+		key   string
+		value string
+	}{
+		{name: "registration endpoint", key: "TB_REGISTRATION_ENDPOINT", value: ""},
+		{name: "project identity", key: "RAILWAY_PROJECT_ID", value: ""},
+		{name: "enrollment nonce", key: "TB_ENROLLMENT_NONCE", value: ""},
+		{name: "project alias", key: "TB_DNS_PROJECT_ALIAS", value: "invalid alias"},
+		{name: "Railway port", key: "PORT", value: "invalid"},
+		{name: "edge identity", key: "TB_EDGE_ID", value: ""},
+		{name: "log level", key: "TB_LOG_LEVEL", value: "verbose"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv(test.key, test.value)
+			if _, err := LoadConnector(); err == nil {
+				t.Fatalf("LoadConnector() accepted %s=%q", test.key, test.value)
+			}
+		})
 	}
 }
 

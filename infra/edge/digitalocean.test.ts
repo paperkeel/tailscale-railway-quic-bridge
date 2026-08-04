@@ -5,6 +5,7 @@ import {
 	createDigitalOceanEdge,
 	edgeFirewallRules,
 	edgeVolumeResourceOptions,
+	prepareScript,
 } from "./digitalocean";
 
 const resources: pulumi.runtime.MockResourceArgs[] = [];
@@ -31,6 +32,9 @@ beforeAll(async () => {
 				}
 				if (args.type === "digitalocean:index/sshKey:SshKey") {
 					Object.assign(state, { fingerprint: "test-fingerprint" });
+				}
+				if (args.type === "digitalocean:index/reservedIp:ReservedIp") {
+					Object.assign(state, { ipAddress: "203.0.113.10" });
 				}
 				return { id: `${args.name}-id`, state };
 			},
@@ -59,7 +63,9 @@ beforeAll(async () => {
 			connectors: [
 				{
 					connectorId: "api",
+					projectId: "project-id",
 					environment: "test",
+					environmentName: "test",
 					slot: 0,
 					virtualPrefix: "fd20::/16",
 					realPrefix: "fd12::/16",
@@ -78,6 +84,7 @@ beforeAll(async () => {
 		});
 
 		return {
+			ready: await resolve(deployment.ready.urn),
 			statusCommand: await resolve(deployment.statusCommand),
 			logsCommand: await resolve(deployment.logsCommand),
 			statusIsSecret: await pulumi.isSecret(deployment.statusCommand),
@@ -96,7 +103,7 @@ beforeAll(async () => {
 });
 
 describe("DigitalOcean edge structure", () => {
-	it("restricts SSH and opens only the two public UDP ports", () => {
+	it("restricts SSH and opens only the public UDP ports", () => {
 		const rules = edgeFirewallRules(["192.0.2.0/24"]);
 
 		expect(rules.inboundRules).toEqual([
@@ -115,6 +122,11 @@ describe("DigitalOcean edge structure", () => {
 				portRange: "4433",
 				sourceAddresses: ["0.0.0.0/0", "::/0"],
 			},
+			{
+				protocol: "udp",
+				portRange: "4434",
+				sourceAddresses: ["0.0.0.0/0", "::/0"],
+			},
 		]);
 	});
 
@@ -131,6 +143,15 @@ describe("DigitalOcean edge structure", () => {
 		});
 		expect(attachment.inputs.volumeId).toBe("Tailbridge-edge-state-id");
 		expect(edgeVolumeResourceOptions).toEqual({ retainOnDelete: true });
+	});
+
+	it("preserves an existing secret environment until the atomic upload", () => {
+		expect(prepareScript("tailbridge-state")).toContain(
+			"chmod 0600 /opt/tailbridge/edge.env",
+		);
+		expect(prepareScript("tailbridge-state")).not.toContain(
+			"/dev/null /opt/tailbridge/edge.env",
+		);
 	});
 
 	it("returns workstation SSH commands without secret taint", () => {

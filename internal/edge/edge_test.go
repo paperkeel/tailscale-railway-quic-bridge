@@ -16,13 +16,17 @@ import (
 	"math/big"
 	"net"
 	"net/netip"
+	"net/url"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/config"
 	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/protocol"
+	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/registry"
 	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/status"
+	"github.com/miekg/dns"
 	"github.com/quic-go/quic-go"
 )
 
@@ -40,6 +44,129 @@ func TestRandomID(t *testing.T) {
 	}
 	if first == second {
 		t.Fatal("expected unique session identifiers")
+	}
+}
+
+func TestDynamicRegistryRefreshAndUnknownDNS(t *testing.T) {
+	ctx := context.Background()
+	store, err := registry.Open(filepath.Join(t.TempDir(), "registry.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.InitializePool(ctx, netip.MustParsePrefix("fd40::/16"), nil); err != nil {
+		t.Fatal(err)
+	}
+	request := registry.PendingRequest{ID: "request", ProjectID: "project", EnvironmentID: "environment", EnvironmentName: "production", ProjectAlias: "shop", EnvironmentAlias: "production", IdentityKey: make([]byte, 32), TransportKey: make([]byte, 32), Proof: make([]byte, 32)}
+	if _, _, err := store.CreatePending(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.Approve(ctx, registry.Approval{RequestID: request.ID, ProviderID: "provider", JTI: "jti", JTIExpiresAt: time.Now().Add(time.Minute), LeaseClass: "persistent", LeaseDuration: time.Hour, RealPrefix: netip.MustParsePrefix("fd12::/16")}); err != nil {
+		t.Fatal(err)
+	}
+	state := status.New("test")
+	cfg := config.Edge{VirtualNetwork: netip.MustParsePrefix("fd40::/16"), MaxTCPFlows: 10, MaxUDPFlows: 10, UDPIdleTimeout: time.Second}
+	server, err := NewWithStore(ctx, cfg, store, slog.Default(), state)
+	if err != nil || len(server.routes) != 1 || server.routes[0].target.VirtualPrefix != netip.MustParsePrefix("fd40::/16") {
+		t.Fatalf("NewWithStore() routes=%v err=%v", server.routes, err)
+	}
+	if state.Snapshot().ConfiguredConnectors != 1 {
+		t.Fatalf("dynamic status = %#v", state.Snapshot())
+	}
+
+	listener, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	client, err := net.DialUDP("udp", nil, listener.LocalAddr().(*net.UDPAddr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	query := new(dns.Msg)
+	query.SetQuestion("api.unknown.preview.railway.internal.", dns.TypeAAAA)
+	payload, _ := query.Pack()
+	server.forwardDNS(ctx, listener, client.LocalAddr().(*net.UDPAddr), payload)
+	_ = client.SetReadDeadline(time.Now().Add(time.Second))
+	buffer := make([]byte, 2048)
+	n, err := client.Read(buffer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := new(dns.Msg)
+	if err := response.Unpack(buffer[:n]); err != nil || response.Rcode != dns.RcodeNameError {
+		t.Fatalf("DNS response = %#v, %v", response, err)
+	}
+	query.SetQuestion("api.shop.production.railway.internal.", dns.TypeAAAA)
+	payload, _ = query.Pack()
+	server.forwardDNS(ctx, listener, client.LocalAddr().(*net.UDPAddr), payload)
+	n, err = client.Read(buffer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := response.Unpack(buffer[:n]); err != nil || response.Rcode != dns.RcodeServerFailure {
+		t.Fatalf("inactive connector DNS response = %#v, %v", response, err)
+	}
+	server.forwardDNS(ctx, listener, client.LocalAddr().(*net.UDPAddr), []byte("invalid"))
+	if address, err := listenerInterfaceAddress("127.0.0.1:53"); err != nil || address.Port != 53 {
+		t.Fatalf("listenerInterfaceAddress() = %v, %v", address, err)
+	}
+	if _, err := listenerInterfaceAddress("missing-interface:53"); err == nil {
+		t.Fatal("listenerInterfaceAddress() accepted a missing interface")
+	}
+	policy := reconciledPolicy{policy: &edgeFakePolicy{}, server: server}
+	if err := policy.Replace(ctx, []netip.Prefix{netip.MustParsePrefix("fd40::/16")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Revoke(ctx, "project", "environment", time.Hour, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.refreshDynamic(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(server.registry) != 0 || len(server.routes) != 0 {
+		t.Fatalf("refreshDynamic() retained inactive entries: registry=%d routes=%d", len(server.registry), len(server.routes))
+	}
+}
+
+type edgeFakePolicy struct{ routes []netip.Prefix }
+
+func (*edgeFakePolicy) Apply(context.Context) error { return nil }
+
+func (p *edgeFakePolicy) Replace(_ context.Context, routes []netip.Prefix) error {
+	p.routes = append([]netip.Prefix(nil), routes...)
+	return nil
+}
+
+func (*edgeFakePolicy) Close(context.Context) error { return nil }
+
+func TestAcceptDNS(t *testing.T) {
+	server := testServer(1)
+	listener := testUDPListener(t)
+	client, err := net.DialUDP("udp", nil, listener.LocalAddr().(*net.UDPAddr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- server.acceptDNS(ctx, listener) }()
+	query := new(dns.Msg)
+	query.SetQuestion("api.outside.example.", dns.TypeAAAA)
+	payload, _ := query.Pack()
+	if _, err := client.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	_ = client.SetReadDeadline(time.Now().Add(time.Second))
+	buffer := make([]byte, 2048)
+	if _, err := client.Read(buffer); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	_ = listener.Close()
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -62,13 +189,64 @@ func TestConnectionClosed(t *testing.T) {
 	}
 }
 
+func TestAuthenticateDynamicConnector(t *testing.T) {
+	ctx := context.Background()
+	store, err := registry.Open(filepath.Join(t.TempDir(), "registry.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.InitializePool(ctx, netip.MustParsePrefix("fd40::/16"), nil); err != nil {
+		t.Fatal(err)
+	}
+	identityKey := make([]byte, ed25519.PublicKeySize)
+	identityKey[0] = 1
+	keyID := registry.Fingerprint(identityKey)
+	request := registry.PendingRequest{ID: "request", ProjectID: "project", EnvironmentID: "environment", EnvironmentName: "production", ProjectAlias: "shop", EnvironmentAlias: "production", IdentityKey: identityKey, TransportKey: make([]byte, ed25519.PublicKeySize), Proof: make([]byte, 32)}
+	if _, _, err := store.CreatePending(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.Approve(ctx, registry.Approval{RequestID: request.ID, ProviderID: "provider", JTI: "jti", JTIExpiresAt: time.Now().Add(time.Minute), LeaseClass: "persistent", LeaseDuration: time.Hour, RealPrefix: netip.MustParsePrefix("fd12::/16")}); err != nil {
+		t.Fatal(err)
+	}
+	client, connection, cleanup := testQUICPairWithIdentity(t, protocol.ALPNV3, "/connector/project/environment/"+keyID)
+	defer cleanup()
+	cfg := config.Edge{VirtualNetwork: netip.MustParsePrefix("fd40::/16"), AllowedRoutes: []netip.Prefix{netip.MustParsePrefix("fd12::/16")}, MaxTCPFlows: 4, MaxUDPFlows: 4, UDPIdleTimeout: time.Second}
+	server, err := NewWithStore(ctx, cfg, store, slog.New(slog.NewTextHandler(io.Discard, nil)), status.New("test"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := startAuthentication(server, connection)
+	stream, err := client.OpenStreamSync(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hello := protocol.ConnectorHelloV3{ProtocolVersion: protocol.ProtocolVersionV3, ProjectID: "project", EnvironmentID: "environment", IdentityKeyID: keyID, SoftwareVersion: "test", StartedUnixNano: time.Now().UnixNano(), Routes: []string{"fd12::/16"}}
+	if err := protocol.WriteFrame(stream, hello); err != nil {
+		t.Fatal(err)
+	}
+	var accepted protocol.ConnectorAccepted
+	if err := protocol.ReadFrame(stream, &accepted); err != nil || accepted.VirtualPrefix != "fd40::/16" {
+		t.Fatalf("dynamic acceptance = %#v, %v", accepted, err)
+	}
+	if err := client.CloseWithError(0, "test complete"); err != nil {
+		t.Fatal(err)
+	}
+	waitForAuthentication(t, done)
+	registration, err := store.Registration(ctx, "project", "environment")
+	if err != nil || registration.State != "ready" {
+		t.Fatalf("dynamic registration = %#v, %v", registration, err)
+	}
+}
+
 type fakePolicy struct {
 	applyErr error
 	closed   bool
 }
 
-func (p *fakePolicy) Apply(context.Context) error { return p.applyErr }
-func (p *fakePolicy) Close(context.Context) error { p.closed = true; return nil }
+func (p *fakePolicy) Apply(context.Context) error                   { return p.applyErr }
+func (p *fakePolicy) Replace(context.Context, []netip.Prefix) error { return p.applyErr }
+func (p *fakePolicy) Close(context.Context) error                   { p.closed = true; return nil }
 
 func TestRunReportsNetworkStartupFailures(t *testing.T) {
 	originalWait := waitForNetwork
@@ -148,6 +326,47 @@ func TestRunReportsListenerStartupFailures(t *testing.T) {
 	listenUDP = func(string) (*net.UDPConn, error) { return nil, errors.New("UDP listen failed") }
 	if err := newServer().Run(context.Background()); err == nil || !strings.Contains(err.Error(), "listen for transparent UDP") {
 		t.Fatalf("Run() error = %v, want a UDP listener error", err)
+	}
+}
+
+func TestRunDynamicServicesUntilCancellation(t *testing.T) {
+	originalWait := waitForNetwork
+	originalCreate := createPolicy
+	originalTCP := listenTCP
+	originalUDP := listenUDP
+	t.Cleanup(func() {
+		waitForNetwork = originalWait
+		createPolicy = originalCreate
+		listenTCP = originalTCP
+		listenUDP = originalUDP
+	})
+	waitForNetwork = func(context.Context) error { return nil }
+	listenTCP = func(string) (net.Listener, error) { return net.Listen("tcp", "127.0.0.1:0") }
+	listenUDP = func(string) (*net.UDPConn, error) {
+		return net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	}
+	policy := &fakePolicy{}
+	createPolicy = func([]netip.Prefix, string, string) (networkPolicy, error) { return policy, nil }
+	store, err := registry.Open(filepath.Join(t.TempDir(), "registry.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.InitializePool(context.Background(), netip.MustParsePrefix("fd40::/16"), nil); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Edge{Common: testCommon(t), VirtualNetwork: netip.MustParsePrefix("fd40::/16"), QUICListenAddr: "127.0.0.1:0", TCPListenAddr: "127.0.0.1:0", UDPListenAddr: "127.0.0.1:0", DNSListenAddr: "127.0.0.1:0", MaxTCPFlows: 4, MaxUDPFlows: 4, UDPIdleTimeout: time.Second, ReconcileInterval: time.Millisecond, SlotQuarantine: time.Hour}
+	server, err := NewWithStore(context.Background(), cfg, store, slog.New(slog.NewTextHandler(io.Discard, nil)), status.New("test"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if err := server.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !policy.closed {
+		t.Fatal("Run() did not close the dynamic network policy")
 	}
 }
 
@@ -540,7 +759,12 @@ func TestAuthenticateAcceptsNarrowerRoute(t *testing.T) {
 	if accepted.MaxTCPFlows != 1 {
 		t.Fatalf("got TCP flow limit %d", accepted.MaxTCPFlows)
 	}
+	deadline := time.Now().Add(time.Second)
 	active := server.session.Load()
+	for active == nil && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+		active = server.session.Load()
+	}
 	if active == nil || active.id != accepted.SessionID {
 		t.Fatal("the server did not store the accepted session")
 	}
@@ -692,6 +916,29 @@ func TestCloseUDPFlowsReleasesAllResponseSockets(t *testing.T) {
 		if err := connection.SetReadDeadline(time.Now()); err == nil {
 			t.Fatal("closeUDPFlows() left a response socket open")
 		}
+	}
+}
+
+func TestDNSFlowsUseDedicatedLimit(t *testing.T) {
+	server := testServer(2)
+	reply, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reply.Close()
+	server.dnsFlowMax = 1
+	active := &session{id: "connector"}
+	source := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1000}
+	destination := netip.MustParseAddrPort("[fd40::10]:53")
+	if _, err := server.edgeUDPFlowWithReply(active, "first", source, destination, destination, reply, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.edgeUDPFlowWithReply(active, "second", source, destination, destination, reply, true); err == nil {
+		t.Fatal("edgeUDPFlowWithReply() exceeded the DNS flow limit")
+	}
+	server.closeUDPSession(active)
+	if server.dnsFlows != 0 {
+		t.Fatalf("closeUDPSession() left %d DNS flows", server.dnsFlows)
 	}
 }
 
@@ -975,8 +1222,17 @@ func waitForAuthentication(t *testing.T, done <-chan struct{}) {
 }
 
 func testQUICPair(t *testing.T) (*quic.Conn, *quic.Conn, func()) {
+	return testQUICPairWithIdentity(t, protocol.ALPN, "/connector/railway-production")
+}
+
+func testQUICPairWithIdentity(t *testing.T, alpn, identityPath string) (*quic.Conn, *quic.Conn, func()) {
 	t.Helper()
-	listener := testQUICListener(t)
+	certificate := testTLSCertificate(t)
+	serverTLS := &tls.Config{Certificates: []tls.Certificate{certificate}, ClientAuth: tls.RequestClientCert, NextProtos: []string{alpn}}
+	listener, err := quic.ListenAddr("127.0.0.1:0", serverTLS, &quic.Config{EnableDatagrams: true})
+	if err != nil {
+		t.Fatal(err)
+	}
 	accepted := make(chan *quic.Conn, 1)
 	acceptError := make(chan error, 1)
 	go func() {
@@ -987,7 +1243,7 @@ func testQUICPair(t *testing.T) (*quic.Conn, *quic.Conn, func()) {
 		}
 		accepted <- connection
 	}()
-	clientTLS := &tls.Config{InsecureSkipVerify: true, NextProtos: []string{protocol.ALPN}}
+	clientTLS := &tls.Config{Certificates: []tls.Certificate{testTLSCertificateForIdentity(t, identityPath)}, InsecureSkipVerify: true, NextProtos: []string{alpn}}
 	client, err := quic.DialAddr(context.Background(), listener.Addr().String(), clientTLS, &quic.Config{EnableDatagrams: true})
 	if err != nil {
 		_ = listener.Close()
@@ -1012,7 +1268,7 @@ func testQUICPair(t *testing.T) (*quic.Conn, *quic.Conn, func()) {
 func testQUICListener(t *testing.T) *quic.Listener {
 	t.Helper()
 	certificate := testTLSCertificate(t)
-	serverTLS := &tls.Config{Certificates: []tls.Certificate{certificate}, NextProtos: []string{protocol.ALPN}}
+	serverTLS := &tls.Config{Certificates: []tls.Certificate{certificate}, ClientAuth: tls.RequestClientCert, NextProtos: []string{protocol.ALPN}}
 	listener, err := quic.ListenAddr("127.0.0.1:0", serverTLS, &quic.Config{EnableDatagrams: true})
 	if err != nil {
 		t.Fatal(err)
@@ -1021,6 +1277,10 @@ func testQUICListener(t *testing.T) *quic.Listener {
 }
 
 func testTLSCertificate(t *testing.T) tls.Certificate {
+	return testTLSCertificateForIdentity(t, "/connector/railway-production")
+}
+
+func testTLSCertificateForIdentity(t *testing.T, identityPath string) tls.Certificate {
 	t.Helper()
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -1032,7 +1292,8 @@ func testTLSCertificate(t *testing.T) tls.Certificate {
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().Add(time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+		URIs:         []*url.URL{{Scheme: "spiffe", Host: "tailbridge.local", Path: identityPath}},
 	}
 	der, err := x509.CreateCertificate(rand.Reader, template, template, public, private)
 	if err != nil {

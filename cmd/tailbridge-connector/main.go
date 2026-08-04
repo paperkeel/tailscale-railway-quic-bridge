@@ -10,6 +10,7 @@ import (
 
 	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/config"
 	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/connector"
+	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/enrollment"
 	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/logging"
 	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/observability"
 	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/status"
@@ -32,6 +33,13 @@ func run(ctx context.Context) int {
 		return 2
 	}
 	logger := logging.New(cfg.LogLevel)
+	if cfg.RegistrationMode == "dynamic" {
+		cfg, err = enrollment.Ensure(ctx, cfg)
+		if err != nil {
+			logger.Error("The connector could not complete registration.", "error", err)
+			return 1
+		}
+	}
 	shutdown, err := observability.Setup(context.Background(), "tailbridge-connector", version, logger)
 	if err != nil {
 		logger.Error("Tailbridge could not configure observability.", "error", err)

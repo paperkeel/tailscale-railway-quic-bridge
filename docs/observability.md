@@ -29,23 +29,39 @@ The connector is ready after the edge accepts its authenticated session.
 
 The Prometheus endpoint reports these metrics:
 
-| Metric | Type | Description |
-|---|---|---|
-| `tailbridge_ready` | Gauge | Reports whether the component is ready. |
-| `tailbridge_tcp_flows_active` | Gauge | Reports the current active TCP flows. |
-| `tailbridge_tcp_flows_total` | Counter | Counts all TCP flows. |
-| `tailbridge_udp_flows_active` | Gauge | Reports the current active UDP flows. |
-| `tailbridge_udp_flows_total` | Counter | Counts all UDP flows. |
-| `tailbridge_udp_datagrams_dropped_total` | Counter | Counts UDP datagrams that Tailbridge drops. |
-| `tailbridge_policy_denials_total` | Counter | Counts flows that the network policy denies. |
-| `tailbridge_quic_smoothed_rtt_microseconds` | Gauge | Reports the smoothed QUIC round-trip time. |
-| `tailbridge_quic_bytes_sent` | Gauge | Reports bytes sent by the current QUIC connection. |
-| `tailbridge_quic_bytes_received` | Gauge | Reports bytes received by the current QUIC connection. |
-| `tailbridge_quic_bytes_lost` | Gauge | Reports bytes lost by the current QUIC connection. |
-| `tailbridge_quic_send_bits_per_second` | Gauge | Reports the five-second QUIC send rate. |
-| `tailbridge_quic_receive_bits_per_second` | Gauge | Reports the five-second QUIC receive rate. |
+| Metric                                                  | Type      | Description                                                   |
+| ------------------------------------------------------- | --------- | ------------------------------------------------------------- |
+| `tailbridge_ready`                                      | Gauge     | Reports whether the component is ready.                       |
+| `tailbridge_tcp_flows_active`                           | Gauge     | Reports the current active TCP flows.                         |
+| `tailbridge_tcp_flows_total`                            | Counter   | Counts all TCP flows.                                         |
+| `tailbridge_udp_flows_active`                           | Gauge     | Reports the current active UDP flows.                         |
+| `tailbridge_udp_flows_total`                            | Counter   | Counts all UDP flows.                                         |
+| `tailbridge_udp_datagrams_dropped_total`                | Counter   | Counts UDP datagrams that Tailbridge drops.                   |
+| `tailbridge_policy_denials_total`                       | Counter   | Counts flows that the network policy denies.                  |
+| `tailbridge_registrations{state,lease_class}`           | Gauge     | Counts registration records by bounded state and lease class. |
+| `tailbridge_registration_attempts_total{result,reason}` | Counter   | Counts registration attempts by bounded outcome.              |
+| `tailbridge_registration_latency_seconds`               | Histogram | Measures registration request processing time.                |
+| `tailbridge_oidc_validation_total{result,reason}`       | Counter   | Counts OIDC validations by bounded outcome.                   |
+| `tailbridge_certificates_expiring`                      | Gauge     | Counts active certificates that expire within seven days.     |
+| `tailbridge_leases_expiring`                            | Gauge     | Counts active leases that expire within seven days.           |
+| `tailbridge_routes_active`                              | Gauge     | Counts active, non-expired dynamic routes.                    |
+| `tailbridge_routes_pending`                             | Gauge     | Counts route generations that are not applied.                |
+| `tailbridge_route_reconcile_seconds`                    | Histogram | Measures route reconciliation time.                           |
+| `tailbridge_route_reconcile_total{result}`              | Counter   | Counts reconciliations by bounded outcome.                    |
+| `tailbridge_virtual_pool_allocated`                     | Gauge     | Counts allocated virtual `/16` routes.                        |
+| `tailbridge_virtual_pool_available`                     | Gauge     | Counts virtual `/16` routes that are available.               |
+| `tailbridge_virtual_pool_quarantined`                   | Gauge     | Counts virtual `/16` routes in quarantine.                    |
+| `tailbridge_pending_requests`                           | Gauge     | Counts unexpired pending requests.                            |
+| `tailbridge_quic_smoothed_rtt_microseconds`             | Gauge     | Reports the smoothed QUIC round-trip time.                    |
+| `tailbridge_quic_bytes_sent`                            | Gauge     | Reports bytes sent by the current QUIC connection.            |
+| `tailbridge_quic_bytes_received`                        | Gauge     | Reports bytes received by the current QUIC connection.        |
+| `tailbridge_quic_bytes_lost`                            | Gauge     | Reports bytes lost by the current QUIC connection.            |
+| `tailbridge_quic_send_bits_per_second`                  | Gauge     | Reports the five-second QUIC send rate.                       |
+| `tailbridge_quic_receive_bits_per_second`               | Gauge     | Reports the five-second QUIC receive rate.                    |
 
 The QUIC RTT excludes the client, Tailscale subnet path, and destination service.
+
+Connector metric labels contain only the bounded route slot. They do not contain repository names, Railway IDs, environment IDs, or public-key fingerprints. Structured logs contain those values for audit and diagnosis.
 Use this PromQL expression to graph connector-to-edge latency in milliseconds:
 
 ```promql

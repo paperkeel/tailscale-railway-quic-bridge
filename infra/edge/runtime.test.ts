@@ -6,6 +6,7 @@ import {
 	renderCloudInit,
 	renderCompose,
 	renderEdgeEnvironment,
+	edgeImageReference,
 } from "./runtime";
 
 describe("edge runtime rendering", () => {
@@ -31,11 +32,10 @@ describe("edge runtime rendering", () => {
 
 		expect(environment).toContain("TB_EDGE_ID=shared-edge\n");
 		expect(environment).toContain("TB_MTLS_KEY_B64=key\n");
-		expect(environment).toContain("TB_ALLOWED_ROUTES=fd20::/16\n");
 		const encoded = environment.match(/^TB_CONNECTORS_B64=(.+)$/m)?.[1];
-		expect(JSON.parse(Buffer.from(encoded ?? "", "base64").toString())).toEqual([
-			connector("api", 0, "fd20::/16"),
-		]);
+		expect(JSON.parse(Buffer.from(encoded ?? "", "base64").toString())).toEqual(
+			[connector("api", 0, "fd20::/16")],
+		);
 		expect(environment).toContain("TS_AUTHKEY=tskey-auth-test\n");
 		expect(environment).toContain("TS_STATE_DIR=/var/lib/tailscale\n");
 		expect(environment.endsWith("\n")).toBe(true);
@@ -61,10 +61,36 @@ describe("edge runtime rendering", () => {
 		expect(renderCompose("internal-testing", template)).toBe(
 			"image: ghcr.io/bearfire-dev/tailscale-railway-quic-bridge-edge:internal-testing\n",
 		);
-		expect(renderCompose("sha256:abc", template)).toContain("@sha256:abc");
+		const digest = `sha256:${"a".repeat(64)}`;
+		expect(renderCompose(digest, template)).toContain(`@${digest}`);
 		expect(renderCompose("registry.example/edge:v1", template)).toBe(
 			"image: registry.example/edge:v1\n",
 		);
+		expect(renderCompose(`registry.example/edge:v1@${digest}`, template)).toBe(
+			`image: registry.example/edge:v1@${digest}\n`,
+		);
+		expect(renderCompose("tailbridge-edge:test", template)).toBe(
+			"image: tailbridge-edge:test\n",
+		);
+	});
+
+	it("rejects mutable and malformed edge image references", () => {
+		expect(() => edgeImageReference("latest")).toThrow("latest tag");
+		expect(() => edgeImageReference("registry.example/edge:latest")).toThrow(
+			"latest tag",
+		);
+		expect(() =>
+			edgeImageReference(
+				`registry.example/edge:latest@sha256:${"a".repeat(64)}`,
+			),
+		).toThrow("latest tag");
+		expect(() => edgeImageReference("registry.example/edge")).toThrow(
+			"tag or digest",
+		);
+		expect(() => edgeImageReference("sha256:abc")).toThrow(
+			"complete SHA-256 digest",
+		);
+		expect(() => edgeImageReference("edge tag")).toThrow("whitespace");
 	});
 
 	it("binds the persistent Tailscale state into the edge container", () => {
@@ -72,6 +98,9 @@ describe("edge runtime rendering", () => {
 
 		expect(compose).toContain(
 			"/var/lib/tailbridge/tailscale:/var/lib/tailscale",
+		);
+		expect(compose).toContain(
+			"/var/lib/tailbridge/registry:/var/lib/tailbridge/registry",
 		);
 		expect(compose).toContain("read_only: true");
 		expect(compose).toContain("NET_ADMIN");
@@ -89,7 +118,9 @@ describe("edge runtime rendering", () => {
 function connector(name: string, slot: number, virtualPrefix: string) {
 	return {
 		connectorId: name,
+		projectId: `${name}-project`,
 		environment: "production",
+		environmentName: "production",
 		slot,
 		virtualPrefix,
 		realPrefix: "fd12::/16",

@@ -1,0 +1,218 @@
+name: Tailbridge connector enrollment
+
+on:
+  workflow_call:
+    inputs:
+      project-id:
+        required: true
+        type: string
+      environment-id:
+        required: true
+        type: string
+      environment-name:
+        required: true
+        type: string
+      service-id:
+        required: false
+        default: ""
+        type: string
+      project-alias:
+        required: false
+        default: ""
+        type: string
+      environment-alias:
+        required: false
+        default: ""
+        type: string
+      edge-id:
+        required: false
+        default: ""
+        type: string
+      edge-endpoint:
+        required: false
+        default: ""
+        type: string
+      registration-endpoint:
+        required: false
+        default: ""
+        type: string
+      approval-url:
+        required: true
+        type: string
+      trust-bundle-b64:
+        required: false
+        default: ""
+        type: string
+      oidc-provider-id:
+        required: false
+        default: github
+        type: string
+      oidc-audience:
+        required: false
+        default: tailbridge-enrollment
+        type: string
+      tailscale-tag:
+        required: false
+        default: tag:tailbridge-ci
+        type: string
+      operation:
+        required: false
+        default: enroll
+        type: string
+    secrets:
+      railway-token:
+        required: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  connector:
+    environment: ${{ inputs.environment-name }}
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - name: Validate enrollment inputs
+        env:
+          OPERATION: ${{ inputs.operation }}
+          APPROVAL_URL: ${{ inputs.approval-url }}
+          SERVICE_ID: ${{ inputs.service-id }}
+          PROJECT_ALIAS: ${{ inputs.project-alias }}
+          ENVIRONMENT_ALIAS: ${{ inputs.environment-alias }}
+          EDGE_ID: ${{ inputs.edge-id }}
+          EDGE_ENDPOINT: ${{ inputs.edge-endpoint }}
+          REGISTRATION_ENDPOINT: ${{ inputs.registration-endpoint }}
+          TRUST_BUNDLE_B64: ${{ inputs.trust-bundle-b64 }}
+          RAILWAY_TOKEN: ${{ secrets.railway-token }}
+        run: |
+          case "$OPERATION" in
+            enroll|revoke) ;;
+            *) echo 'operation must be enroll or revoke.' >&2; exit 1 ;;
+          esac
+          case "$APPROVAL_URL" in
+            http://*|https://*) ;;
+            *) echo 'approval-url must use HTTP or HTTPS.' >&2; exit 1 ;;
+          esac
+          if [[ "$OPERATION" == enroll ]]; then
+            for name in SERVICE_ID PROJECT_ALIAS ENVIRONMENT_ALIAS EDGE_ID EDGE_ENDPOINT REGISTRATION_ENDPOINT TRUST_BUNDLE_B64 RAILWAY_TOKEN; do
+              if [[ -z "${!name}" ]]; then
+                echo "$name is required for enrollment." >&2
+                exit 1
+              fi
+            done
+          fi
+
+      - name: Join the tailnet
+        uses: tailscale/github-action@306e68a486fd2350f2bfc3b19fcd143891a4a2d8 # v4
+        with:
+          oauth-client-id: ${{ vars.TS_OAUTH_CLIENT_ID }}
+          audience: ${{ vars.TS_AUDIENCE }}
+          tags: ${{ inputs.tailscale-tag }}
+
+      - name: Revoke the preview registration
+        if: inputs.operation == 'revoke'
+        env:
+          APPROVAL_URL: ${{ inputs.approval-url }}
+          PROJECT_ID: ${{ inputs.project-id }}
+          ENVIRONMENT_ID: ${{ inputs.environment-id }}
+          PROVIDER_ID: ${{ inputs.oidc-provider-id }}
+          OIDC_AUDIENCE: ${{ inputs.oidc-audience }}
+        run: |
+          oidc_response=$(curl --connect-timeout 10 --max-time 30 --fail --silent --show-error --get --header "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" --data-urlencode "audience=$OIDC_AUDIENCE" "$ACTIONS_ID_TOKEN_REQUEST_URL")
+          token=$(jq -er '.value' <<<"$oidc_response")
+          payload=$(jq -cn --arg projectId "$PROJECT_ID" --arg environmentId "$ENVIRONMENT_ID" --arg providerId "$PROVIDER_ID" --arg oidcToken "$token" '{projectId:$projectId,environmentId:$environmentId,providerId:$providerId,oidcToken:$oidcToken}')
+          curl --connect-timeout 10 --max-time 30 --fail --silent --show-error --request POST --header 'Content-Type: application/json' --data "$payload" "$APPROVAL_URL/v1/revoke"
+
+      - name: Install the Railway CLI
+        if: inputs.operation == 'enroll'
+        run: |
+          mkdir -p "$RUNNER_TEMP/tailbridge-bin"
+          curl --connect-timeout 10 --max-time 60 --fail --location --silent --show-error \
+            https://github.com/railwayapp/cli/releases/download/v4.65.0/railway-v4.65.0-x86_64-unknown-linux-gnu.tar.gz \
+            --output "$RUNNER_TEMP/railway-cli.tar.gz"
+          printf '%s  %s\n' '4203df43d3a9d7f5950c26b626d6f43d96648b0b137366cba68286e29f7e77cc' "$RUNNER_TEMP/railway-cli.tar.gz" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/railway-cli.tar.gz" -C "$RUNNER_TEMP/tailbridge-bin" railway
+          printf '%s\n' "$RUNNER_TEMP/tailbridge-bin" >> "$GITHUB_PATH"
+
+      - name: Deploy the connector with a one-time enrollment nonce
+        if: inputs.operation == 'enroll'
+        env:
+          RAILWAY_TOKEN: ${{ secrets.railway-token }}
+          PROJECT_ID: ${{ inputs.project-id }}
+          ENVIRONMENT_ID: ${{ inputs.environment-id }}
+          SERVICE_ID: ${{ inputs.service-id }}
+          PROJECT_ALIAS: ${{ inputs.project-alias }}
+          ENVIRONMENT_ALIAS: ${{ inputs.environment-alias }}
+          EDGE_ID: ${{ inputs.edge-id }}
+          EDGE_ENDPOINT: ${{ inputs.edge-endpoint }}
+          REGISTRATION_ENDPOINT: ${{ inputs.registration-endpoint }}
+          TRUST_BUNDLE_B64: ${{ inputs.trust-bundle-b64 }}
+        run: |
+          nonce=$(openssl rand -hex 32)
+          printf '%s' "$nonce" > "$RUNNER_TEMP/tailbridge-enrollment-nonce"
+          railway link --project "$PROJECT_ID" --environment "$ENVIRONMENT_ID" --service "$SERVICE_ID"
+          railway variables --skip-deploys \
+            --set "TB_REGISTRATION_MODE=dynamic" \
+            --set "TB_EDGE_ID=$EDGE_ID" \
+            --set "TB_EDGE_ENDPOINT=$EDGE_ENDPOINT" \
+            --set "TB_REGISTRATION_ENDPOINT=$REGISTRATION_ENDPOINT" \
+            --set "TB_IDENTITY_DIR=/var/lib/tailbridge" \
+            --set "TB_ENROLLMENT_NONCE=$nonce" \
+            --set "TB_DNS_PROJECT_ALIAS=$PROJECT_ALIAS" \
+            --set "TB_DNS_ENVIRONMENT_ALIAS=$ENVIRONMENT_ALIAS" \
+            --set "TB_TRUST_BUNDLE_B64=$TRUST_BUNDLE_B64" \
+            --set "RAILWAY_RUN_UID=65532"
+          railway redeploy --service "$SERVICE_ID" --yes
+
+      - name: Find the pending registration
+        if: inputs.operation == 'enroll'
+        env:
+          APPROVAL_URL: ${{ inputs.approval-url }}
+          PROJECT_ID: ${{ inputs.project-id }}
+          ENVIRONMENT_ID: ${{ inputs.environment-id }}
+        run: |
+          deadline=$((SECONDS + 1800))
+          while (( SECONDS < deadline )); do
+            nonce=$(cat "$RUNNER_TEMP/tailbridge-enrollment-nonce")
+            if response=$(curl --connect-timeout 10 --max-time 30 --fail --silent --get --header "X-Tailbridge-Enrollment-Nonce: $nonce" --data-urlencode "projectId=$PROJECT_ID" --data-urlencode "environmentId=$ENVIRONMENT_ID" "$APPROVAL_URL/v1/pending"); then
+              printf '%s' "$response" > "$RUNNER_TEMP/tailbridge-pending.json"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo 'The connector did not submit a registration request within 30 minutes.' >&2
+          exit 1
+
+      - name: Approve the connector identity
+        if: inputs.operation == 'enroll'
+        env:
+          APPROVAL_URL: ${{ inputs.approval-url }}
+          PROVIDER_ID: ${{ inputs.oidc-provider-id }}
+          OIDC_AUDIENCE: ${{ inputs.oidc-audience }}
+        run: |
+          oidc_response=$(curl --connect-timeout 10 --max-time 30 --fail --silent --show-error --get --header "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" --data-urlencode "audience=$OIDC_AUDIENCE" "$ACTIONS_ID_TOKEN_REQUEST_URL")
+          token=$(jq -er '.value' <<<"$oidc_response")
+          request_id=$(jq -er '.requestId' "$RUNNER_TEMP/tailbridge-pending.json")
+          fingerprint=$(jq -er '.publicFingerprint' "$RUNNER_TEMP/tailbridge-pending.json")
+          nonce=$(cat "$RUNNER_TEMP/tailbridge-enrollment-nonce")
+          payload=$(jq -cn --arg requestId "$request_id" --arg providerId "$PROVIDER_ID" --arg oidcToken "$token" --arg enrollmentNonce "$nonce" --arg publicFingerprint "$fingerprint" '{requestId:$requestId,providerId:$providerId,oidcToken:$oidcToken,enrollmentNonce:$enrollmentNonce,publicFingerprint:$publicFingerprint}')
+          curl --connect-timeout 10 --max-time 30 --fail --silent --show-error --request POST --header 'Content-Type: application/json' --data "$payload" "$APPROVAL_URL/v1/approve"
+
+      - name: Wait for connector readiness
+        if: inputs.operation == 'enroll'
+        env:
+          APPROVAL_URL: ${{ inputs.approval-url }}
+        run: |
+          request_id=$(jq -er '.requestId' "$RUNNER_TEMP/tailbridge-pending.json")
+          deadline=$((SECONDS + 600))
+          while (( SECONDS < deadline )); do
+            nonce=$(cat "$RUNNER_TEMP/tailbridge-enrollment-nonce")
+            if state=$(curl --connect-timeout 10 --max-time 30 --fail --silent --header "X-Tailbridge-Enrollment-Nonce: $nonce" "$APPROVAL_URL/v1/pending/$request_id" | jq -er '.state'); then
+              if [[ "$state" == ready ]]; then
+                exit 0
+              fi
+            fi
+            sleep 5
+          done
+          echo 'The connector did not become ready within 10 minutes.' >&2
+          exit 1

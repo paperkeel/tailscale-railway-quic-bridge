@@ -1,6 +1,7 @@
 package status
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/registry"
 	"github.com/quic-go/quic-go"
 )
 
@@ -91,6 +93,11 @@ func TestListenerServesStatusAndStopsWithContext(t *testing.T) {
 		"tailbridge_connectors_configured",
 		"tailbridge_connectors_ready",
 		"tailbridge_connector_ready",
+		"tailbridge_connector_session_age_seconds",
+		"tailbridge_connector_quic_smoothed_rtt_microseconds",
+		"tailbridge_connector_quic_bytes_sent",
+		"tailbridge_connector_quic_bytes_received",
+		"tailbridge_connector_quic_bytes_lost",
 		"tailbridge_tcp_flows_active",
 		"tailbridge_tcp_flows_total",
 		"tailbridge_udp_flows_active",
@@ -368,6 +375,124 @@ func TestStoreQUICStatsRejectsASupersededObserver(t *testing.T) {
 	}
 	if state.quicRTT.Load() != 10_000 || state.quicSent.Load() != 20 || state.quicReceived.Load() != 30 || state.quicLost.Load() != 40 {
 		t.Fatal("storeQUICStats() did not store the current connection statistics")
+	}
+}
+
+func TestConnectorQUICObserversRemainIndependent(t *testing.T) {
+	state := New("test")
+	state.ConfigureConnectors([]Connector{
+		{ConnectorID: "first", Slot: 0},
+		{ConnectorID: "second", Slot: 1},
+	})
+
+	state.quicMu.Lock()
+	firstObserver, _ := state.startQUICObserverLocked("first")
+	secondObserver, _ := state.startQUICObserverLocked("second")
+	state.quicMu.Unlock()
+	firstStats := quic.ConnectionStats{SmoothedRTT: time.Millisecond, BytesSent: 10, BytesReceived: 20, BytesLost: 1}
+	secondStats := quic.ConnectionStats{SmoothedRTT: 2 * time.Millisecond, BytesSent: 30, BytesReceived: 40, BytesLost: 2}
+	if !state.storeConnectorQUICSample("first", firstObserver, firstStats, 0, 0) {
+		t.Fatal("the first connector observer rejected its sample")
+	}
+	if !state.storeConnectorQUICSample("second", secondObserver, secondStats, 0, 0) {
+		t.Fatal("the second connector observer rejected its sample")
+	}
+
+	snapshot := state.Snapshot()
+	if snapshot.Connectors[0].QUICBytesSent != 10 || snapshot.Connectors[1].QUICBytesSent != 30 {
+		t.Fatalf("Snapshot() combined connector metrics: %#v", snapshot.Connectors)
+	}
+	state.quicMu.Lock()
+	state.stopQUICObserverLocked("first", firstObserver)
+	state.quicMu.Unlock()
+	snapshot = state.Snapshot()
+	if snapshot.Connectors[0].QUICBytesSent != 0 || snapshot.Connectors[1].QUICBytesSent != 30 {
+		t.Fatalf("stopping one observer changed another connector: %#v", snapshot.Connectors)
+	}
+}
+
+func TestNewConnectorObserverSupersedesOnlySameConnector(t *testing.T) {
+	state := New("test")
+	state.ConfigureConnectors([]Connector{{ConnectorID: "first"}, {ConnectorID: "second"}})
+	state.quicMu.Lock()
+	oldFirst, _ := state.startQUICObserverLocked("first")
+	second, _ := state.startQUICObserverLocked("second")
+	newFirst, _ := state.startQUICObserverLocked("first")
+	state.quicMu.Unlock()
+	stats := quic.ConnectionStats{BytesSent: 1}
+	if state.storeConnectorQUICSample("first", oldFirst, stats, 0, 0) {
+		t.Fatal("a connector accepted a superseded observer")
+	}
+	if !state.storeConnectorQUICSample("first", newFirst, stats, 0, 0) {
+		t.Fatal("a connector rejected its current observer")
+	}
+	if !state.storeConnectorQUICSample("second", second, stats, 0, 0) {
+		t.Fatal("one connector superseded another connector observer")
+	}
+}
+
+func TestConnectorQUICObserverRejectsUnknownConnector(t *testing.T) {
+	state := New("test")
+	state.ConfigureConnectors([]Connector{{ConnectorID: "known"}})
+	state.quicMu.Lock()
+	_, ok := state.startQUICObserverLocked("unknown")
+	count := len(state.connectorQUIC)
+	state.quicMu.Unlock()
+	if ok || count != 1 {
+		t.Fatalf("unknown connector observer: accepted=%t count=%d", ok, count)
+	}
+}
+
+func TestConfigureConnectorsClearsReadyAtomically(t *testing.T) {
+	state := New("test")
+	state.SetReady(true)
+	state.ConfigureConnectors([]Connector{{ConnectorID: "first"}})
+	if state.ready.Load() || state.Snapshot().Ready {
+		t.Fatal("ConfigureConnectors() kept stale readiness")
+	}
+}
+
+func TestReconcileConnectorsPreservesCurrentSessions(t *testing.T) {
+	state := New("test")
+	state.ConfigureConnectors([]Connector{{ConnectorID: "first", Slot: 1}})
+	state.ConnectorReady("first", "session")
+	state.ReconcileConnectors([]Connector{{ConnectorID: "first", Slot: 1}, {ConnectorID: "second", Slot: 2}})
+	snapshot := state.Snapshot()
+	if snapshot.Ready || snapshot.ReadyConnectors != 1 || snapshot.Connectors[0].SessionID != "session" {
+		t.Fatalf("reconciled snapshot = %#v", snapshot)
+	}
+	state.SetRegistryMetrics(registry.Stats{
+		Registrations:     3,
+		Active:            2,
+		Allocated:         2,
+		Available:         60,
+		Quarantined:       1,
+		Pending:           4,
+		RoutesPending:     1,
+		CertificatesSoon:  2,
+		LeasesSoon:        3,
+		RegistrationState: map[string]int64{"ready\x00persistent": 2},
+	})
+	state.ObserveRegistration("approved", "approved", 25*time.Millisecond)
+	state.ObserveOIDC("success", "accepted")
+	state.ObserveRouteReconcile("success", 50*time.Millisecond)
+	if state.registrations.Load() != 3 || state.poolAvailable.Load() != 60 || state.pendingRequests.Load() != 4 {
+		t.Fatal("SetRegistryMetrics() did not store registry gauges")
+	}
+	var metrics bytes.Buffer
+	state.writeRegistryMetrics(&metrics)
+	for _, want := range []string{
+		`tailbridge_registrations{state="ready",lease_class="persistent"} 2`,
+		`tailbridge_registration_attempts_total{result="approved",reason="approved"} 1`,
+		`tailbridge_oidc_validation_total{result="success",reason="accepted"} 1`,
+		`tailbridge_route_reconcile_total{result="success"} 1`,
+		"tailbridge_routes_pending 1",
+		"tailbridge_certificates_expiring 2",
+		"tailbridge_leases_expiring 3",
+	} {
+		if !strings.Contains(metrics.String(), want) {
+			t.Errorf("registry metrics do not contain %q\n%s", want, metrics.String())
+		}
 	}
 }
 
