@@ -55,8 +55,7 @@ describe("Tailbridge", () => {
 	beforeEach(() => resources.splice(0));
 
 	it("accepts a configurable dynamic registration network", () => {
-		expect(() =>
-			normalizeTailbridgeArgs({
+		const normalized = normalizeTailbridgeArgs({
 				stage: "test",
 				edgeId: "shared-edge",
 				registration: {
@@ -79,8 +78,34 @@ describe("Tailbridge", () => {
 					},
 				],
 				tailscaleAuthKey: pulumi.secret("secret-auth-key"),
+			});
+		expect(normalized.registration?.virtualNetwork).toBe("fd40::/10");
+	});
+
+	it("rejects migration slots outside the registration network", () => {
+		expect(() =>
+			normalizeTailbridgeArgs({
+				stage: "test",
+				edgeId: "shared-edge",
+				virtualNetwork: "fd40::/16",
+				registration: { frozen: false, oidcPolicies: [] },
+				edge: {
+					provider: "digitalocean",
+					region: "nyc3",
+					size: "s-1vcpu-1gb",
+					sshSourceCidrs: ["192.0.2.0/24"],
+				},
+				connectors: [
+					{
+						name: "api",
+						slot: 1,
+						projectId: "api-project",
+						environmentId: "api-environment",
+					},
+				],
+				tailscaleAuthKey: pulumi.secret("secret-auth-key"),
 			}),
-		).not.toThrow();
+		).toThrow(/does not fit/);
 	});
 
 	it("rejects a development package in a production stage", () => {

@@ -86,6 +86,7 @@ func (r *Routes) reconcile(ctx context.Context) (resultErr error) {
 	for _, route := range routes {
 		values = append(values, route.String())
 	}
+	slices.Sort(values)
 	previousPayload, err := r.run(ctx, "/usr/local/bin/tailscale", "debug", "prefs")
 	if err != nil {
 		return fmt.Errorf("read current Tailscale routes: %w", err)

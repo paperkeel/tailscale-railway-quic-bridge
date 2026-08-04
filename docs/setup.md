@@ -204,7 +204,9 @@ Do not add static certificate, virtual-prefix, DNS-suffix, or lease-class variab
 
 1. Create the connector service from the Railway template.
 
-2. Add `RAILWAY_TOKEN` as a repository or environment secret.
+2. Add `RAILWAY_TOKEN` as a repository or organization secret.
+
+   Do not define `RAILWAY_TOKEN` in a selectable GitHub environment. The reusable workflow binds the job to the Railway environment name for OIDC. Protect those environments with deployment rules.
 
 3. Call `.github/workflows/tailbridge-enroll.yml` from this repository by a full commit SHA.
 
@@ -231,6 +233,8 @@ The reusable workflow performs these actions:
 8. It waits for the connector session and route generation to become ready through the tailnet-only approval API.
 
 The edge approves only an HMAC that uses the Railway-delivered nonce. Public project and environment IDs are not enough to claim an identity.
+
+The approval API uses HTTP only after the runner joins Tailscale. Tailscale authenticates the caller and encrypts the connection with WireGuard. Do not expose the approval listener outside the tailnet.
 
 ## Configure split DNS
 

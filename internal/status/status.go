@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"slices"
@@ -14,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/registry"
 	"github.com/quic-go/quic-go"
 )
 
@@ -162,19 +164,19 @@ func (s *Server) ReconcileConnectors(connectors []Connector) {
 	s.quicMu.Unlock()
 }
 
-func (s *Server) SetRegistryMetrics(registrations, active, allocated, available, quarantined, pending, routesPending, certificatesSoon, leasesSoon int64, states map[string]int64) {
-	s.registrations.Store(registrations)
-	s.routesActive.Store(active)
-	s.poolAllocated.Store(allocated)
-	s.poolAvailable.Store(available)
-	s.poolQuarantine.Store(quarantined)
-	s.pendingRequests.Store(pending)
-	s.routesPending.Store(routesPending)
-	s.certificatesSoon.Store(certificatesSoon)
-	s.leasesSoon.Store(leasesSoon)
+func (s *Server) SetRegistryMetrics(metrics registry.Stats) {
+	s.registrations.Store(metrics.Registrations)
+	s.routesActive.Store(metrics.Active)
+	s.poolAllocated.Store(metrics.Allocated)
+	s.poolAvailable.Store(metrics.Available)
+	s.poolQuarantine.Store(metrics.Quarantined)
+	s.pendingRequests.Store(metrics.Pending)
+	s.routesPending.Store(metrics.RoutesPending)
+	s.certificatesSoon.Store(metrics.CertificatesSoon)
+	s.leasesSoon.Store(metrics.LeasesSoon)
 	s.metricMu.Lock()
-	s.registrationState = make(map[string]int64, len(states))
-	for key, value := range states {
+	s.registrationState = make(map[string]int64, len(metrics.RegistrationState))
+	for key, value := range metrics.RegistrationState {
 		s.registrationState[key] = value
 	}
 	s.metricMu.Unlock()
@@ -497,21 +499,6 @@ tailbridge_quic_send_bits_per_second %d
 # HELP tailbridge_quic_receive_bits_per_second Current QUIC receive throughput in bits per second.
 # TYPE tailbridge_quic_receive_bits_per_second gauge
 tailbridge_quic_receive_bits_per_second %d
-# HELP tailbridge_connector_ready Whether a configured connector is ready.
-# TYPE tailbridge_connector_ready gauge
-# HELP tailbridge_connector_session_age_seconds Age of the active connector session in seconds.
-# TYPE tailbridge_connector_session_age_seconds gauge
-# HELP tailbridge_connector_quic_smoothed_rtt_microseconds Smoothed connector QUIC round-trip time in microseconds.
-# TYPE tailbridge_connector_quic_smoothed_rtt_microseconds gauge
-# HELP tailbridge_connector_quic_bytes_sent Total bytes sent by the connector QUIC connection.
-# TYPE tailbridge_connector_quic_bytes_sent gauge
-# HELP tailbridge_connector_quic_bytes_received Total bytes received by the connector QUIC connection.
-# TYPE tailbridge_connector_quic_bytes_received gauge
-# HELP tailbridge_connector_quic_bytes_lost Total bytes lost by the connector QUIC connection.
-# TYPE tailbridge_connector_quic_bytes_lost gauge
-# HELP tailbridge_registrations Registration records grouped by bounded state and lease class.
-# TYPE tailbridge_registrations gauge
-tailbridge_registrations{state="all",lease_class="all"} %d
 # HELP tailbridge_routes_active Active, non-expired dynamic routes.
 # TYPE tailbridge_routes_active gauge
 tailbridge_routes_active %d
@@ -527,20 +514,9 @@ tailbridge_virtual_pool_quarantined %d
 # HELP tailbridge_pending_requests Unexpired pending registration requests.
 # TYPE tailbridge_pending_requests gauge
 tailbridge_pending_requests %d
-`, ready, snapshot.ConfiguredConnectors, snapshot.ReadyConnectors, s.active.Load(), s.flows.Load(), s.udpActive.Load(), s.udpFlows.Load(), s.udpDropped.Load(), s.denied.Load(), s.quicRTT.Load(), s.quicSent.Load(), s.quicReceived.Load(), s.quicLost.Load(), s.quicSendRate.Load(), s.quicRecvRate.Load(), s.registrations.Load(), s.routesActive.Load(), s.poolAllocated.Load(), s.poolAvailable.Load(), s.poolQuarantine.Load(), s.pendingRequests.Load())
+		`, ready, snapshot.ConfiguredConnectors, snapshot.ReadyConnectors, s.active.Load(), s.flows.Load(), s.udpActive.Load(), s.udpFlows.Load(), s.udpDropped.Load(), s.denied.Load(), s.quicRTT.Load(), s.quicSent.Load(), s.quicReceived.Load(), s.quicLost.Load(), s.quicSendRate.Load(), s.quicRecvRate.Load(), s.routesActive.Load(), s.poolAllocated.Load(), s.poolAvailable.Load(), s.poolQuarantine.Load(), s.pendingRequests.Load())
+		s.writeConnectorMetrics(w, snapshot.Connectors)
 		s.writeRegistryMetrics(w)
-		for _, connector := range snapshot.Connectors {
-			connectorReady := 0
-			if connector.Ready {
-				connectorReady = 1
-			}
-			_, _ = fmt.Fprintf(w, "tailbridge_connector_ready{slot=%q} %d\n", fmt.Sprint(connector.Slot), connectorReady)
-			_, _ = fmt.Fprintf(w, "tailbridge_connector_session_age_seconds{slot=%q} %d\n", fmt.Sprint(connector.Slot), connector.SessionAgeSeconds)
-			_, _ = fmt.Fprintf(w, "tailbridge_connector_quic_smoothed_rtt_microseconds{slot=%q} %d\n", fmt.Sprint(connector.Slot), connector.QUICSmoothedRTTMicroseconds)
-			_, _ = fmt.Fprintf(w, "tailbridge_connector_quic_bytes_sent{slot=%q} %d\n", fmt.Sprint(connector.Slot), connector.QUICBytesSent)
-			_, _ = fmt.Fprintf(w, "tailbridge_connector_quic_bytes_received{slot=%q} %d\n", fmt.Sprint(connector.Slot), connector.QUICBytesReceived)
-			_, _ = fmt.Fprintf(w, "tailbridge_connector_quic_bytes_lost{slot=%q} %d\n", fmt.Sprint(connector.Slot), connector.QUICBytesLost)
-		}
 	}))
 	var listenConfig net.ListenConfig
 	listener, err := listenConfig.Listen(context.Background(), "tcp", addr)
@@ -560,7 +536,41 @@ tailbridge_pending_requests %d
 	}, nil
 }
 
+func (s *Server) writeConnectorMetrics(w io.Writer, connectors []Connector) {
+	type family struct {
+		name, help string
+		value      func(Connector) uint64
+	}
+	families := []family{
+		{"tailbridge_connector_ready", "Whether a configured connector is ready.", func(connector Connector) uint64 {
+			if connector.Ready {
+				return 1
+			}
+			return 0
+		}},
+		{"tailbridge_connector_session_age_seconds", "Age of the active connector session in seconds.", func(connector Connector) uint64 { return uint64(max(connector.SessionAgeSeconds, 0)) }},
+		{"tailbridge_connector_quic_smoothed_rtt_microseconds", "Smoothed connector QUIC round-trip time in microseconds.", func(connector Connector) uint64 { return uint64(max(connector.QUICSmoothedRTTMicroseconds, 0)) }},
+		{"tailbridge_connector_quic_bytes_sent", "Total bytes sent by the connector QUIC connection.", func(connector Connector) uint64 { return connector.QUICBytesSent }},
+		{"tailbridge_connector_quic_bytes_received", "Total bytes received by the connector QUIC connection.", func(connector Connector) uint64 { return connector.QUICBytesReceived }},
+		{"tailbridge_connector_quic_bytes_lost", "Total bytes lost by the connector QUIC connection.", func(connector Connector) uint64 { return connector.QUICBytesLost }},
+	}
+	for _, metric := range families {
+		_, _ = fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s gauge\n", metric.name, metric.help, metric.name)
+		for _, connector := range connectors {
+			_, _ = fmt.Fprintf(w, "%s{slot=%q} %d\n", metric.name, fmt.Sprint(connector.Slot), metric.value(connector))
+		}
+	}
+}
+
 func (s *Server) writeRegistryMetrics(w io.Writer) {
+	s.metricMu.RLock()
+	registrationState := maps.Clone(s.registrationState)
+	registrationAttempts := maps.Clone(s.registrationAttempts)
+	oidcValidations := maps.Clone(s.oidcValidations)
+	registrationLatency := s.registrationLatency
+	routeReconcile := s.routeReconcile
+	routeReconcileResults := maps.Clone(s.routeReconcileResults)
+	s.metricMu.RUnlock()
 	_, _ = fmt.Fprintf(w, `# HELP tailbridge_routes_pending Route generations that have not been applied.
 # TYPE tailbridge_routes_pending gauge
 tailbridge_routes_pending %d
@@ -570,34 +580,39 @@ tailbridge_certificates_expiring %d
 # HELP tailbridge_leases_expiring Active registration leases that expire within seven days.
 # TYPE tailbridge_leases_expiring gauge
 tailbridge_leases_expiring %d
-# HELP tailbridge_registration_attempts_total Registration attempts grouped by bounded result and reason.
-# TYPE tailbridge_registration_attempts_total counter
-# HELP tailbridge_registration_latency_seconds Registration request processing duration.
-# TYPE tailbridge_registration_latency_seconds histogram
-# HELP tailbridge_oidc_validation_total OIDC validations grouped by bounded result and reason.
-# TYPE tailbridge_oidc_validation_total counter
-# HELP tailbridge_route_reconcile_seconds Route reconciliation duration.
-# TYPE tailbridge_route_reconcile_seconds histogram
-# HELP tailbridge_route_reconcile_total Route reconciliations grouped by result.
-# TYPE tailbridge_route_reconcile_total counter
+# HELP tailbridge_registrations Registration records grouped by bounded state and lease class.
+# TYPE tailbridge_registrations gauge
 `, s.routesPending.Load(), s.certificatesSoon.Load(), s.leasesSoon.Load())
-	s.metricMu.RLock()
-	defer s.metricMu.RUnlock()
-	for key, value := range s.registrationState {
+	for key, value := range registrationState {
 		parts := strings.SplitN(key, "\x00", 2)
 		if len(parts) == 2 {
 			_, _ = fmt.Fprintf(w, "tailbridge_registrations{state=%q,lease_class=%q} %d\n", parts[0], parts[1], value)
 		}
 	}
-	for labels, value := range s.registrationAttempts {
+	_, _ = fmt.Fprint(w, `# HELP tailbridge_registration_attempts_total Registration attempts grouped by bounded result and reason.
+# TYPE tailbridge_registration_attempts_total counter
+`)
+	for labels, value := range registrationAttempts {
 		_, _ = fmt.Fprintf(w, "tailbridge_registration_attempts_total{result=%q,reason=%q} %d\n", labels.result, labels.reason, value)
 	}
-	writeHistogram(w, "tailbridge_registration_latency_seconds", s.registrationLatency)
-	for labels, value := range s.oidcValidations {
+	_, _ = fmt.Fprint(w, `# HELP tailbridge_registration_latency_seconds Registration request processing duration.
+# TYPE tailbridge_registration_latency_seconds histogram
+`)
+	writeHistogram(w, "tailbridge_registration_latency_seconds", registrationLatency)
+	_, _ = fmt.Fprint(w, `# HELP tailbridge_oidc_validation_total OIDC validations grouped by bounded result and reason.
+# TYPE tailbridge_oidc_validation_total counter
+`)
+	for labels, value := range oidcValidations {
 		_, _ = fmt.Fprintf(w, "tailbridge_oidc_validation_total{result=%q,reason=%q} %d\n", labels.result, labels.reason, value)
 	}
-	writeHistogram(w, "tailbridge_route_reconcile_seconds", s.routeReconcile)
-	for result, value := range s.routeReconcileResults {
+	_, _ = fmt.Fprint(w, `# HELP tailbridge_route_reconcile_seconds Route reconciliation duration.
+# TYPE tailbridge_route_reconcile_seconds histogram
+`)
+	writeHistogram(w, "tailbridge_route_reconcile_seconds", routeReconcile)
+	_, _ = fmt.Fprint(w, `# HELP tailbridge_route_reconcile_total Route reconciliations grouped by result.
+# TYPE tailbridge_route_reconcile_total counter
+`)
+	for result, value := range routeReconcileResults {
 		_, _ = fmt.Fprintf(w, "tailbridge_route_reconcile_total{result=%q} %d\n", result, value)
 	}
 }

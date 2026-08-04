@@ -14,7 +14,6 @@ import (
 	"net/netip"
 	"os/exec"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/config"
@@ -128,6 +127,10 @@ func (s *Server) pendingForIdentity(response http.ResponseWriter, request *http.
 		return
 	}
 	pending := requests[len(requests)-1]
+	if !authorizedPending(request, pending) {
+		http.Error(response, "The registration request was not found.", http.StatusNotFound)
+		return
+	}
 	writeJSON(response, http.StatusOK, map[string]any{"requestId": pending.ID, "state": s.readinessState(request.Context(), pending), "projectId": pending.ProjectID, "environmentId": pending.EnvironmentID, "environmentName": pending.EnvironmentName, "publicFingerprint": pending.IdentityKeyID})
 }
 
@@ -139,6 +142,10 @@ func (s *Server) pending(response http.ResponseWriter, request *http.Request) {
 	}
 	if err != nil {
 		http.Error(response, "The registry could not read the request.", http.StatusInternalServerError)
+		return
+	}
+	if !authorizedPending(request, pending) {
+		http.Error(response, "The registration request was not found.", http.StatusNotFound)
 		return
 	}
 	writeJSON(response, http.StatusOK, map[string]any{
@@ -157,12 +164,20 @@ func (s *Server) readinessState(ctx context.Context, pending registry.PendingReq
 	if err != nil || registration.State != "ready" {
 		return "connecting"
 	}
-	if _, err := s.store.PendingRouteGeneration(ctx); err == nil {
+	generation, err := s.store.PendingRouteGeneration(ctx)
+	if err == nil && slices.Contains(generation.DesiredRoutes, registration.VirtualPrefix) {
 		return "connecting"
-	} else if !errors.Is(err, registry.ErrNotFound) {
+	}
+	if err != nil && !errors.Is(err, registry.ErrNotFound) {
 		return "connecting"
 	}
 	return "ready"
+}
+
+func authorizedPending(request *http.Request, pending registry.PendingRequest) bool {
+	nonce := request.Header.Get("X-Tailbridge-Enrollment-Nonce")
+	registrationRequest := protocol.RegistrationRequest{ProjectID: pending.ProjectID, EnvironmentID: pending.EnvironmentID, IdentityKey: pending.IdentityKey, TransportKey: pending.TransportKey}
+	return nonce != "" && hmac.Equal(pending.Proof, enrollment.Proof([]byte(nonce), registrationRequest))
 }
 
 func (s *Server) approve(response http.ResponseWriter, request *http.Request) {
@@ -306,7 +321,13 @@ func interfaceAddress(value string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("approval listener address is not valid: %w", err)
 	}
-	if strings.Contains(host, ".") || strings.Contains(host, ":") || host == "" {
+	if host == "" {
+		return "", errors.New("approval listener must not use an unspecified address")
+	}
+	if address, err := netip.ParseAddr(host); err == nil {
+		if address.IsUnspecified() {
+			return "", errors.New("approval listener must not use an unspecified address")
+		}
 		return net.JoinHostPort(host, port), nil
 	}
 	device, err := net.InterfaceByName(host)

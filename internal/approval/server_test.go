@@ -28,6 +28,7 @@ import (
 	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/pki"
 	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/protocol"
 	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/registry"
+	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/status"
 )
 
 func TestPendingRequestRequiresAllowedTailscaleTag(t *testing.T) {
@@ -36,12 +37,15 @@ func TestPendingRequestRequiresAllowedTailscaleTag(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	request := registry.PendingRequest{ID: "request", ProjectID: "project", EnvironmentID: "environment", EnvironmentName: "preview", ProjectAlias: "project", EnvironmentAlias: "preview", IdentityKey: make([]byte, 32), TransportKey: make([]byte, 32), Proof: make([]byte, 32)}
+	nonce := "pending-secret"
+	registrationRequest := protocol.RegistrationRequest{ProjectID: "project", EnvironmentID: "environment", IdentityKey: make([]byte, 32), TransportKey: make([]byte, 32)}
+	request := registry.PendingRequest{ID: "request", ProjectID: "project", EnvironmentID: "environment", EnvironmentName: "preview", ProjectAlias: "project", EnvironmentAlias: "preview", IdentityKey: registrationRequest.IdentityKey, TransportKey: registrationRequest.TransportKey, Proof: enrollment.Proof([]byte(nonce), registrationRequest)}
 	if _, _, err := store.CreatePending(context.Background(), request); err != nil {
 		t.Fatal(err)
 	}
 	server := &Server{config: config.Edge{ApprovalTailscaleTags: []string{"tag:ci"}}, store: store, logger: slog.Default(), whois: func(context.Context, string) ([]string, error) { return []string{"tag:ci"}, nil }}
 	httpRequest := httptest.NewRequest(http.MethodGet, "http://edge/v1/pending?projectId=project&environmentId=environment", nil)
+	httpRequest.Header.Set("X-Tailbridge-Enrollment-Nonce", nonce)
 	httpRequest.RemoteAddr = "100.64.0.2:1234"
 	recorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, httpRequest)
@@ -74,6 +78,23 @@ func TestApprovalServerRunsAndStops(t *testing.T) {
 	}
 }
 
+func TestNewServerBuildsDependencies(t *testing.T) {
+	store, err := registry.Open(filepath.Join(t.TempDir(), "registry.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	certificate, privateKey := approvalIntermediate(t)
+	metrics := status.New("test")
+	server, err := NewServer(config.Edge{OIDCPolicies: []byte(`[]`), IntermediateCertificate: certificate, IntermediatePrivateKey: privateKey}, store, slog.Default(), metrics)
+	if err != nil || server.validator == nil || server.issuer == nil || server.status != metrics {
+		t.Fatalf("NewServer() = %#v, %v", server, err)
+	}
+	if _, err := NewServer(config.Edge{OIDCPolicies: []byte(`{`)}, store, slog.Default()); err == nil {
+		t.Fatal("NewServer() accepted invalid OIDC policy JSON")
+	}
+}
+
 func TestApprovalRejectsInvalidBindingsAndFreeze(t *testing.T) {
 	store, err := registry.Open(filepath.Join(t.TempDir(), "registry.db"))
 	if err != nil {
@@ -83,7 +104,9 @@ func TestApprovalRejectsInvalidBindingsAndFreeze(t *testing.T) {
 	if err := store.InitializePool(context.Background(), netip.MustParsePrefix("fd40::/16"), nil); err != nil {
 		t.Fatal(err)
 	}
-	pending := registry.PendingRequest{ID: "request", ProjectID: "project", EnvironmentID: "environment", EnvironmentName: "preview", ProjectAlias: "shop", EnvironmentAlias: "preview", IdentityKey: make([]byte, 32), TransportKey: make([]byte, 32), Proof: make([]byte, 32)}
+	nonce := "nonce"
+	registrationRequest := protocol.RegistrationRequest{ProjectID: "project", EnvironmentID: "environment", IdentityKey: make([]byte, 32), TransportKey: make([]byte, 32)}
+	pending := registry.PendingRequest{ID: "request", ProjectID: "project", EnvironmentID: "environment", EnvironmentName: "preview", ProjectAlias: "shop", EnvironmentAlias: "preview", IdentityKey: registrationRequest.IdentityKey, TransportKey: registrationRequest.TransportKey, Proof: enrollment.Proof([]byte(nonce), registrationRequest)}
 	if _, _, err := store.CreatePending(context.Background(), pending); err != nil {
 		t.Fatal(err)
 	}
@@ -107,6 +130,7 @@ func TestApprovalRejectsInvalidBindingsAndFreeze(t *testing.T) {
 		t.Fatalf("fingerprint mismatch status = %d", recorder.Code)
 	}
 	request = httptest.NewRequest(http.MethodGet, "/v1/pending/request", nil)
+	request.Header.Set("X-Tailbridge-Enrollment-Nonce", nonce)
 	request.SetPathValue("id", "request")
 	recorder = httptest.NewRecorder()
 	server.pending(recorder, request)
@@ -243,6 +267,7 @@ func TestApprovalAndRevocation(t *testing.T) {
 		t.Fatal(err)
 	}
 	request = httptest.NewRequest(http.MethodGet, "http://edge/v1/pending/request", nil)
+	request.Header.Set("X-Tailbridge-Enrollment-Nonce", nonce)
 	request.SetPathValue("id", "request")
 	request.RemoteAddr = "100.64.0.2:1234"
 	response = httptest.NewRecorder()

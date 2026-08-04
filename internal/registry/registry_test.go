@@ -1,6 +1,7 @@
 package registry
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/netip"
@@ -224,12 +225,20 @@ func TestStaticRegistrationMigration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	if err := store.InitializePool(ctx, netip.MustParsePrefix("fd40::/16"), nil); err != nil {
+	if err := store.InitializePool(ctx, netip.MustParsePrefix("fd20::/15"), nil); err != nil {
 		t.Fatal(err)
 	}
 	static := StaticRegistration{ProjectID: "project", EnvironmentID: "environment", EnvironmentName: "production", ConnectorID: "legacy", VirtualPrefix: netip.MustParsePrefix("fd20::/16"), RealPrefix: netip.MustParsePrefix("fd12::/16")}
 	if err := store.ImportStatic(ctx, []StaticRegistration{static}); err != nil {
 		t.Fatal(err)
+	}
+	other := PendingRequest{ID: "other", Kind: "enroll", ProjectID: "other-project", EnvironmentID: "other-environment", EnvironmentName: "preview", ProjectAlias: "other", EnvironmentAlias: "preview", IdentityKey: bytes.Repeat([]byte{1}, 32), TransportKey: bytes.Repeat([]byte{2}, 32), Proof: make([]byte, 32)}
+	if _, _, err := store.CreatePending(ctx, other); err != nil {
+		t.Fatal(err)
+	}
+	allocated, _, err := store.Approve(ctx, Approval{RequestID: other.ID, ProviderID: "provider", JTI: "other-jti", JTIExpiresAt: time.Now().Add(time.Minute), LeaseClass: "preview", LeaseDuration: 24 * time.Hour, RealPrefix: static.RealPrefix})
+	if err != nil || allocated.VirtualPrefix != netip.MustParsePrefix("fd21::/16") {
+		t.Fatalf("new allocation = %#v, err=%v", allocated, err)
 	}
 	request := PendingRequest{ID: "migration", Kind: "enroll", ProjectID: static.ProjectID, EnvironmentID: static.EnvironmentID, EnvironmentName: "production", ProjectAlias: "shop", EnvironmentAlias: "production", IdentityKey: make([]byte, 32), TransportKey: make([]byte, 32), Proof: make([]byte, 32)}
 	if _, _, err := store.CreatePending(ctx, request); err != nil {

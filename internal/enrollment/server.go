@@ -27,6 +27,7 @@ type Server struct {
 	logger *slog.Logger
 	issuer *pki.Issuer
 	status *status.Server
+	limit  chan struct{}
 	mu     sync.Mutex
 	source map[string]*rateWindow
 }
@@ -41,7 +42,7 @@ func NewServer(cfg config.Edge, store *registry.Store, logger *slog.Logger, metr
 	if err != nil {
 		return nil, err
 	}
-	server := &Server{config: cfg, store: store, logger: logger, issuer: issuer, source: make(map[string]*rateWindow)}
+	server := &Server{config: cfg, store: store, logger: logger, issuer: issuer, source: make(map[string]*rateWindow), limit: make(chan struct{}, 64)}
 	if len(metrics) > 0 {
 		server.status = metrics[0]
 	}
@@ -66,7 +67,15 @@ func (s *Server) Run(ctx context.Context) error {
 			}
 			return fmt.Errorf("accept registration: %w", err)
 		}
-		go s.handle(ctx, conn)
+		select {
+		case s.limit <- struct{}{}:
+			go func() {
+				defer func() { <-s.limit }()
+				s.handle(ctx, conn)
+			}()
+		default:
+			_ = conn.CloseWithError(1, "registration capacity reached")
+		}
 	}
 }
 
@@ -76,6 +85,18 @@ func (s *Server) handle(ctx context.Context, conn *quic.Conn) {
 	if err != nil {
 		return
 	}
+	deadline := time.Now().Add(30 * time.Second)
+	if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(deadline) {
+		deadline = contextDeadline
+	}
+	if err := stream.SetDeadline(deadline); err != nil {
+		return
+	}
+	stop := context.AfterFunc(ctx, func() {
+		stream.CancelRead(0)
+		stream.CancelWrite(0)
+	})
+	defer stop()
 	var request protocol.RegistrationRequest
 	if err := protocol.ReadFrame(stream, &request); err != nil {
 		return
@@ -105,9 +126,12 @@ func (s *Server) process(ctx context.Context, source net.Addr, request protocol.
 	}()
 	sourceAddress := sourceHost(source)
 	if request.Kind == "renew" {
-		return s.renew(ctx, source, request)
+		return s.renew(ctx, sourceAddress, request)
 	}
 	if request.RequestID != "" {
+		if !s.allow(sourceAddress) {
+			return protocol.RegistrationResponse{RequestID: request.RequestID, State: "rejected", ErrorCode: "rate_limited", RetryAfterMS: 60000}
+		}
 		pending, err := s.store.Pending(ctx, request.RequestID)
 		if err != nil {
 			return protocol.RegistrationResponse{RequestID: request.RequestID, State: "expired", ErrorCode: "request_not_found"}
@@ -155,8 +179,8 @@ func sourceHost(source net.Addr) string {
 	return source.String()
 }
 
-func (s *Server) renew(ctx context.Context, source net.Addr, request protocol.RegistrationRequest) protocol.RegistrationResponse {
-	if !s.allow(source.String()) || request.ProjectID == "" || request.EnvironmentID == "" || len(request.IdentityKey) != ed25519.PublicKeySize || len(request.TransportKey) != ed25519.PublicKeySize || len(request.Proof) != ed25519.SignatureSize {
+func (s *Server) renew(ctx context.Context, sourceAddress string, request protocol.RegistrationRequest) protocol.RegistrationResponse {
+	if !s.allow(sourceAddress) || request.ProjectID == "" || request.EnvironmentID == "" || len(request.IdentityKey) != ed25519.PublicKeySize || len(request.TransportKey) != ed25519.PublicKeySize || len(request.Proof) != ed25519.SignatureSize {
 		return protocol.RegistrationResponse{State: "rejected", ErrorCode: "invalid_renewal"}
 	}
 	registration, err := s.store.Registration(ctx, request.ProjectID, request.EnvironmentID)
@@ -188,6 +212,9 @@ func (s *Server) renew(ctx context.Context, source net.Addr, request protocol.Re
 }
 
 func (s *Server) responseForPending(ctx context.Context, pending registry.PendingRequest) protocol.RegistrationResponse {
+	if pending.State == "pending" && !pending.ExpiresAt.After(time.Now()) {
+		return protocol.RegistrationResponse{RequestID: pending.ID, State: "expired", ErrorCode: "request_expired"}
+	}
 	if pending.State == "approved" {
 		registration, err := s.store.Registration(ctx, pending.ProjectID, pending.EnvironmentID)
 		if err != nil {
@@ -206,6 +233,18 @@ func (s *Server) allow(source string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now()
+	if len(s.source) >= 1024 {
+		for key, candidate := range s.source {
+			if now.Sub(candidate.start) >= time.Minute {
+				delete(s.source, key)
+			}
+		}
+		if len(s.source) >= 2048 {
+			if _, known := s.source[source]; !known {
+				return false
+			}
+		}
+	}
 	window := s.source[source]
 	if window == nil || now.Sub(window.start) >= time.Minute {
 		s.source[source] = &rateWindow{start: now, count: 1}

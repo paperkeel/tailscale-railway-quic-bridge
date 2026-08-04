@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/registry"
 	"github.com/quic-go/quic-go"
 )
 
@@ -460,7 +461,18 @@ func TestReconcileConnectorsPreservesCurrentSessions(t *testing.T) {
 	if snapshot.Ready || snapshot.ReadyConnectors != 1 || snapshot.Connectors[0].SessionID != "session" {
 		t.Fatalf("reconciled snapshot = %#v", snapshot)
 	}
-	state.SetRegistryMetrics(3, 2, 2, 60, 1, 4, 1, 2, 3, map[string]int64{"ready\x00persistent": 2})
+	state.SetRegistryMetrics(registry.Stats{
+		Registrations:     3,
+		Active:            2,
+		Allocated:         2,
+		Available:         60,
+		Quarantined:       1,
+		Pending:           4,
+		RoutesPending:     1,
+		CertificatesSoon:  2,
+		LeasesSoon:        3,
+		RegistrationState: map[string]int64{"ready\x00persistent": 2},
+	})
 	state.ObserveRegistration("approved", "approved", 25*time.Millisecond)
 	state.ObserveOIDC("success", "accepted")
 	state.ObserveRouteReconcile("success", 50*time.Millisecond)

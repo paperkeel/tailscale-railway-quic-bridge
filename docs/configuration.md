@@ -11,9 +11,9 @@ Use the Tailbridge CLI to generate mutual TLS values. Never commit generated env
 | `TB_EDGE_ID`           |                   Yes | None               | Stable identity for the shared Tailbridge edge.                             |
 | `TB_CONNECTOR_ID`      | Static connector only | None               | Stable identity for one Railway connector.                                  |
 | `TB_ENVIRONMENT`       | Static connector only | None               | Railway environment name.                                                   |
-| `TB_MTLS_CA_B64`       |                   Yes | None               | Base64 PEM trust bundle.                                                    |
-| `TB_MTLS_CERT_B64`     |                   Yes | None               | Base64 PEM leaf certificate.                                                |
-| `TB_MTLS_KEY_B64`      |                   Yes | None               | Base64 PEM private key.                                                     |
+| `TB_MTLS_CA_B64`       | Edge and static connector | None            | Base64 PEM trust bundle.                                                    |
+| `TB_MTLS_CERT_B64`     | Edge and static connector | None            | Base64 PEM leaf certificate.                                                |
+| `TB_MTLS_KEY_B64`      | Edge and static connector | None            | Base64 PEM private key.                                                     |
 | `TB_ADMIN_LISTEN_ADDR` |                    No | Component-specific | Health and metrics listen address. Use a numeric port from 1 through 65535. |
 | `TB_LOG_LEVEL`         |                    No | `info`             | JSON log level. Use `debug`, `info`, `warn`, or `error`.                    |
 

@@ -181,6 +181,20 @@ func (s *Store) ImportStatic(ctx context.Context, registrations []StaticRegistra
 			registration.RealPrefix.String(), now, now); err != nil {
 			return fmt.Errorf("import static registration %q: %w", registration.ConnectorID, err)
 		}
+		var registrationID int64
+		if err := tx.QueryRowContext(ctx, `SELECT id FROM registrations WHERE project_id = ? AND environment_id = ?`, registration.ProjectID, registration.EnvironmentID).Scan(&registrationID); err != nil {
+			return fmt.Errorf("read imported registration %q: %w", registration.ConnectorID, err)
+		}
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO route_allocations(prefix, state, registration_id) VALUES (?, 'allocated', ?)
+			ON CONFLICT(prefix) DO UPDATE SET state = 'allocated', registration_id = excluded.registration_id, quarantine_until = NULL
+			WHERE route_allocations.registration_id IS NULL OR route_allocations.registration_id = excluded.registration_id`, registration.VirtualPrefix.String(), registrationID)
+		if err != nil {
+			return fmt.Errorf("reserve imported route %q: %w", registration.ConnectorID, err)
+		}
+		if changed, _ := result.RowsAffected(); changed != 1 {
+			return fmt.Errorf("reserve imported route %q: prefix belongs to another registration", registration.ConnectorID)
+		}
 	}
 	return tx.Commit()
 }
@@ -529,7 +543,8 @@ func (s *Store) Renew(ctx context.Context, registration Registration, keyID stri
 	}
 	defer tx.Rollback()
 	now := s.now().UTC()
-	if registration.State != "approved" && registration.State != "ready" || !registration.LeaseExpiresAt.After(now) {
+	current, err := registrationByIdentityTx(ctx, tx, registration.ProjectID, registration.EnvironmentID)
+	if err != nil || current.ID != registration.ID || current.State != "approved" && current.State != "ready" || !current.LeaseExpiresAt.After(now) {
 		return Registration{}, ErrRequestExpired
 	}
 	var active int
@@ -539,15 +554,19 @@ func (s *Store) Renew(ctx context.Context, registration Registration, keyID stri
 	if active != 1 {
 		return Registration{}, ErrNotFound
 	}
+	leaseEnd := now.Add(leaseDuration)
+	result, err := tx.ExecContext(ctx, `UPDATE registrations SET lease_expires_at = ?, updated_at = ? WHERE id = ? AND state IN ('approved', 'ready') AND lease_expires_at > ?`, leaseEnd, now, registration.ID, now)
+	if err != nil {
+		return Registration{}, err
+	}
+	if changed, _ := result.RowsAffected(); changed != 1 {
+		return Registration{}, ErrRequestExpired
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE certificates SET state = 'superseded' WHERE registration_id = ? AND state = 'active'`, registration.ID); err != nil {
 		return Registration{}, fmt.Errorf("supersede previous certificate: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO certificates(id, registration_id, identity_key_id, certificate_pem, state, not_after, created_at) VALUES (?, ?, ?, ?, 'active', ?, ?)`, certificateID, registration.ID, keyID, certificatePEM, certificateEnd, now); err != nil {
 		return Registration{}, fmt.Errorf("store renewed certificate: %w", err)
-	}
-	leaseEnd := now.Add(leaseDuration)
-	if _, err := tx.ExecContext(ctx, `UPDATE registrations SET lease_expires_at = ?, updated_at = ? WHERE id = ?`, leaseEnd, now, registration.ID); err != nil {
-		return Registration{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO leases(registration_id, lease_class, starts_at, expires_at, renewed_at, source) VALUES (?, ?, ?, ?, ?, 'certificate-renewal')`, registration.ID, registration.LeaseClass, now, leaseEnd, now); err != nil {
 		return Registration{}, err
@@ -590,8 +609,8 @@ func (s *Store) Stats(ctx context.Context) (Stats, error) {
 			(SELECT COUNT(*) FROM route_allocations WHERE state = 'quarantined'),
 			(SELECT COUNT(*) FROM pending_requests WHERE state = 'pending' AND expires_at > ?),
 			(SELECT COUNT(*) FROM route_generations WHERE state = 'pending'),
-			(SELECT COUNT(*) FROM certificates WHERE state = 'active' AND not_after <= ?),
-			(SELECT COUNT(*) FROM registrations WHERE state IN ('approved', 'ready') AND lease_expires_at > ? AND lease_expires_at <= ?)`, now, now, now.Add(7*24*time.Hour), now, now.Add(7*24*time.Hour)).Scan(&stats.Registrations, &stats.Active, &stats.Allocated, &stats.Available, &stats.Quarantined, &stats.Pending, &stats.RoutesPending, &stats.CertificatesSoon, &stats.LeasesSoon)
+			(SELECT COUNT(*) FROM certificates WHERE state = 'active' AND not_after > ? AND not_after <= ?),
+			(SELECT COUNT(*) FROM registrations WHERE state IN ('approved', 'ready') AND lease_expires_at > ? AND lease_expires_at <= ?)`, now, now, now, now.Add(7*24*time.Hour), now, now.Add(7*24*time.Hour)).Scan(&stats.Registrations, &stats.Active, &stats.Allocated, &stats.Available, &stats.Quarantined, &stats.Pending, &stats.RoutesPending, &stats.CertificatesSoon, &stats.LeasesSoon)
 	if err != nil {
 		return stats, err
 	}
@@ -639,6 +658,9 @@ func (s *Store) Revoke(ctx context.Context, projectID, environmentID string, qua
 	if _, err := tx.ExecContext(ctx, `UPDATE certificates SET state = 'revoked' WHERE registration_id = ? AND state = 'active'`, registration.ID); err != nil {
 		return fmt.Errorf("revoke certificates: %w", err)
 	}
+	if _, err := tx.ExecContext(ctx, `UPDATE identity_keys SET state = 'retired' WHERE registration_id = ? AND state IN ('active', 'overlap')`, registration.ID); err != nil {
+		return fmt.Errorf("retire identity keys: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE route_allocations SET state = 'quarantined', quarantine_until = ? WHERE registration_id = ?`, now.Add(quarantine), registration.ID); err != nil {
 		return fmt.Errorf("quarantine route: %w", err)
 	}
@@ -683,6 +705,9 @@ func (s *Store) Expire(ctx context.Context, quarantine time.Duration) ([]Registr
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE certificates SET state = 'expired' WHERE registration_id = ? AND state = 'active'`, registration.ID); err != nil {
 			return nil, fmt.Errorf("expire connector certificates: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE identity_keys SET state = 'retired' WHERE registration_id = ? AND state IN ('active', 'overlap')`, registration.ID); err != nil {
+			return nil, fmt.Errorf("retire expired identity keys: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO audit_events(event_type, registration_id, occurred_at, data_json) VALUES ('lease.expired', ?, ?, '{}')`, registration.ID, now); err != nil {
 			return nil, fmt.Errorf("record lease expiry: %w", err)

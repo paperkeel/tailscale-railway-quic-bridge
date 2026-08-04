@@ -126,6 +126,9 @@ func New(policies []Policy, client *http.Client) (*Validator, error) {
 		if policy.ProjectIDClaim == "" || policy.EnvironmentClaim == "" {
 			return nil, fmt.Errorf("OIDC policy %q requires project and environment binding claims", policy.ID)
 		}
+		if policy.RepositoryIDClaim == "" || policy.WorkflowRefClaim == "" || policy.WorkflowSHAClaim == "" || policy.RunIDClaim == "" || policy.RunAttemptClaim == "" {
+			return nil, fmt.Errorf("OIDC policy %q requires repository, workflow, and run audit claims", policy.ID)
+		}
 		if _, exists := validator.policies[policy.ID]; exists {
 			return nil, fmt.Errorf("OIDC policy id %q occurs more than once", policy.ID)
 		}

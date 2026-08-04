@@ -81,6 +81,11 @@ export function normalizeTailbridgeArgs(
 	const slots = new Set<number>();
 	const normalizedConnectors = connectors.map((target) => {
 		validateTarget(target);
+		if (args.registration && target.slot >= 2 ** (16 - networkLength)) {
+			throw new Error(
+				`connector ${target.name} slot does not fit registration.virtualNetwork.`,
+			);
+		}
 		if (names.has(target.name)) {
 			throw new Error(`connector name ${target.name} must be unique.`);
 		}
@@ -106,7 +111,14 @@ export function normalizeTailbridgeArgs(
 		};
 	});
 
-	return { ...args, virtualNetwork, connectors: normalizedConnectors };
+	return {
+		...args,
+		virtualNetwork,
+		registration: args.registration
+			? { ...args.registration, virtualNetwork }
+			: undefined,
+		connectors: normalizedConnectors,
+	};
 }
 
 function validateDynamicNetwork(value: string, exclusions: string[]): void {

@@ -66,6 +66,15 @@ export function createDigitalOceanEdge(
 	args: EdgeDeploymentArgs,
 ): EdgeDeployment {
 	const { certificates, tailscaleAuthKey } = args;
+	if (
+		args.registration &&
+		(certificates.intermediateCertB64 === undefined ||
+			certificates.intermediateKeyB64 === undefined)
+	) {
+		throw new Error(
+			"registration requires intermediateCertB64 and intermediateKeyB64.",
+		);
+	}
 	const resourceName = physicalName(args.edgeId, 48);
 	const childOptions = { parent: args.parent };
 

@@ -11,6 +11,7 @@ export interface TailbridgeConnectorTarget {
 	slot: number;
 	projectId: pulumi.Input<string>;
 	environmentId: pulumi.Input<string>;
+	environmentName?: pulumi.Input<string>;
 	region?: string;
 	realPrefix?: string;
 }
@@ -95,7 +96,7 @@ export class Tailbridge extends pulumi.ComponentResource {
 			connectors: normalized.connectors.map((target) => ({
 				connectorId: target.name,
 				projectId: target.projectId,
-				environment: target.environmentId,
+				environment: target.environmentName ?? target.name,
 				slot: target.slot,
 				virtualPrefix: target.virtualPrefix,
 				realPrefix: target.realPrefix,

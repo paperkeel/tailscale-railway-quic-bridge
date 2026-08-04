@@ -46,6 +46,11 @@ func Ensure(ctx context.Context, cfg config.Connector) (config.Connector, error)
 	if cfg.RegistrationMode != "dynamic" {
 		return cfg, nil
 	}
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 30*time.Minute)
+		defer cancel()
+	}
 	identity, err := loadOrCreate(cfg)
 	if err != nil {
 		return config.Connector{}, err
@@ -71,13 +76,21 @@ func Ensure(ctx context.Context, cfg config.Connector) (config.Connector, error)
 	if err != nil {
 		return config.Connector{}, fmt.Errorf("read assigned virtual prefix: %w", err)
 	}
+	realPrefix, err := netip.ParsePrefix(identity.RealPrefix)
+	if err != nil {
+		return config.Connector{}, fmt.Errorf("read assigned real prefix: %w", err)
+	}
 	if _, err := privateKey(identity.TransportKeyPEM); err != nil {
 		return config.Connector{}, err
 	}
+	identityPrivate, err := privateKey(identity.IdentityKeyPEM)
+	if err != nil {
+		return config.Connector{}, err
+	}
 	cfg.VirtualPrefix = virtualPrefix
-	cfg.RealPrefix = netip.MustParsePrefix(identity.RealPrefix)
+	cfg.RealPrefix = realPrefix
 	cfg.DNSSuffix = identity.DNSSuffix
-	cfg.IdentityKeyID = registry.Fingerprint(publicKey(identity.IdentityKeyPEM))
+	cfg.IdentityKeyID = registry.Fingerprint(identityPrivate.Public().(ed25519.PublicKey))
 	cfg.Common.ConnectorID = cfg.ProjectID + "/" + cfg.EnvironmentID
 	cfg.Common.Environment = cfg.EnvironmentID
 	cfg.Common.Certificate = identity.CertificatePEM
@@ -178,7 +191,18 @@ func register(ctx context.Context, cfg config.Connector, identity localIdentity)
 					return localIdentity{}, err
 				}
 				return identity, nil
-			case "rejected", "expired", "frozen":
+			case "expired":
+				identity.RequestID = ""
+				request.RequestID = ""
+				if err := save(filepath.Join(cfg.IdentityDir, "registration.json"), identity); err != nil {
+					return localIdentity{}, err
+				}
+				continue
+			case "rejected", "frozen":
+				identity.RequestID = ""
+				if err := save(filepath.Join(cfg.IdentityDir, "registration.json"), identity); err != nil {
+					return localIdentity{}, err
+				}
 				return localIdentity{}, fmt.Errorf("registration stopped with status %s: %s", response.State, response.ErrorCode)
 			}
 			request.RequestID = response.RequestID
@@ -208,6 +232,18 @@ func exchange(ctx context.Context, endpoint string, tlsConfig *tls.Config, reque
 	if err != nil {
 		return protocol.RegistrationResponse{}, err
 	}
+	deadline := time.Now().Add(30 * time.Second)
+	if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(deadline) {
+		deadline = contextDeadline
+	}
+	if err := stream.SetDeadline(deadline); err != nil {
+		return protocol.RegistrationResponse{}, err
+	}
+	stop := context.AfterFunc(ctx, func() {
+		stream.CancelRead(0)
+		stream.CancelWrite(0)
+	})
+	defer stop()
 	if err := protocol.WriteFrame(stream, request); err != nil {
 		return protocol.RegistrationResponse{}, err
 	}

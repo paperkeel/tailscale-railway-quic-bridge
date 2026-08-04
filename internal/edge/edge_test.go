@@ -119,6 +119,15 @@ func TestDynamicRegistryRefreshAndUnknownDNS(t *testing.T) {
 	if err := policy.Replace(ctx, []netip.Prefix{netip.MustParsePrefix("fd40::/16")}); err != nil {
 		t.Fatal(err)
 	}
+	if err := store.Revoke(ctx, "project", "environment", time.Hour, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.refreshDynamic(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(server.registry) != 0 || len(server.routes) != 0 {
+		t.Fatalf("refreshDynamic() retained inactive entries: registry=%d routes=%d", len(server.registry), len(server.routes))
+	}
 }
 
 type edgeFakePolicy struct{ routes []netip.Prefix }
@@ -902,6 +911,29 @@ func TestCloseUDPFlowsReleasesAllResponseSockets(t *testing.T) {
 		if err := connection.SetReadDeadline(time.Now()); err == nil {
 			t.Fatal("closeUDPFlows() left a response socket open")
 		}
+	}
+}
+
+func TestDNSFlowsUseDedicatedLimit(t *testing.T) {
+	server := testServer(2)
+	reply, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reply.Close()
+	server.dnsFlowMax = 1
+	active := &session{id: "connector"}
+	source := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1000}
+	destination := netip.MustParseAddrPort("[fd40::10]:53")
+	if _, err := server.edgeUDPFlowWithReply(active, "first", source, destination, destination, reply, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.edgeUDPFlowWithReply(active, "second", source, destination, destination, reply, true); err == nil {
+		t.Fatal("edgeUDPFlowWithReply() exceeded the DNS flow limit")
+	}
+	server.closeUDPSession(active)
+	if server.dnsFlows != 0 {
+		t.Fatalf("closeUDPSession() left %d DNS flows", server.dnsFlows)
 	}
 }
 

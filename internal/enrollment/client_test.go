@@ -231,6 +231,33 @@ func TestRegistrationServerRunsAndStops(t *testing.T) {
 	}
 }
 
+func TestResponseForPendingExpiresStaleRequest(t *testing.T) {
+	server := &Server{}
+	response := server.responseForPending(context.Background(), registry.PendingRequest{
+		ID:        "stale-request",
+		State:     "pending",
+		ExpiresAt: time.Now().Add(-time.Second),
+	})
+	if response.State != "expired" || response.ErrorCode != "request_expired" {
+		t.Fatalf("responseForPending() = %#v", response)
+	}
+}
+
+func TestRegistrationRateWindowIsBounded(t *testing.T) {
+	now := time.Now()
+	server := &Server{source: make(map[string]*rateWindow)}
+	for index := range 2048 {
+		server.source[fmt.Sprint(index)] = &rateWindow{start: now}
+	}
+	if server.allow("unknown") {
+		t.Fatal("allow() admitted a new source when the cache was full")
+	}
+	server.source["0"] = &rateWindow{start: now.Add(-2 * time.Minute)}
+	if !server.allow("new-source") {
+		t.Fatal("allow() did not evict an expired rate window")
+	}
+}
+
 func registrationEdgeCredentials(t *testing.T, edgeID string) config.Common {
 	t.Helper()
 	public, private, _ := ed25519.GenerateKey(rand.Reader)

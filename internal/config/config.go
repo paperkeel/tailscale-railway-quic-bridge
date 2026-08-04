@@ -255,13 +255,9 @@ func LoadConnector() (Connector, error) {
 	if registrationMode != "static" {
 		return Connector{}, errors.New("TB_REGISTRATION_MODE must be static or dynamic")
 	}
-	adminAddress := "[::]:9002"
-	if port := required("PORT"); port != "" && required("TB_ADMIN_LISTEN_ADDR") == "" {
-		parsed, err := strconv.ParseUint(port, 10, 16)
-		if err != nil || parsed == 0 {
-			return Connector{}, fmt.Errorf("PORT must contain a valid TCP port. The value is %q.", port)
-		}
-		adminAddress = "[::]:" + port
+	adminAddress, err := connectorAdminAddress()
+	if err != nil {
+		return Connector{}, err
 	}
 	c, err := loadCommon(adminAddress, true)
 	if err != nil {
@@ -341,13 +337,9 @@ func LoadConnector() (Connector, error) {
 }
 
 func loadDynamicConnector() (Connector, error) {
-	adminAddress := "[::]:9002"
-	if port := required("PORT"); port != "" && required("TB_ADMIN_LISTEN_ADDR") == "" {
-		parsed, err := strconv.ParseUint(port, 10, 16)
-		if err != nil || parsed == 0 {
-			return Connector{}, fmt.Errorf("PORT must contain a valid TCP port. The value is %q.", port)
-		}
-		adminAddress = "[::]:" + port
+	adminAddress, err := connectorAdminAddress()
+	if err != nil {
+		return Connector{}, err
 	}
 	trust, err := decoded("TB_TRUST_BUNDLE_B64")
 	if err != nil {
@@ -407,6 +399,9 @@ func loadDynamicConnector() (Connector, error) {
 		UDPIdleTimeout:       udpIdle,
 		Common:               Common{EdgeID: required("TB_EDGE_ID"), CABundle: trust, AdminAddr: value("TB_ADMIN_LISTEN_ADDR", adminAddress), LogLevel: value("TB_LOG_LEVEL", "info")},
 	}
+	if err := validateCommon(result.Common, false); err != nil {
+		return Connector{}, err
+	}
 	for name, candidate := range map[string]string{
 		"TB_EDGE_ENDPOINT":         result.EdgeEndpoint,
 		"TB_REGISTRATION_ENDPOINT": result.RegistrationEndpoint,
@@ -463,27 +458,46 @@ func loadCommon(defaultAdmin string, requireConnector bool) (Common, error) {
 		AdminAddr:   value("TB_ADMIN_LISTEN_ADDR", defaultAdmin),
 		LogLevel:    value("TB_LOG_LEVEL", "info"),
 	}
+	if err := validateCommon(c, requireConnector); err != nil {
+		return Common{}, err
+	}
+	return c, nil
+}
+
+func connectorAdminAddress() (string, error) {
+	adminAddress := "[::]:9002"
+	if port := required("PORT"); port != "" && required("TB_ADMIN_LISTEN_ADDR") == "" {
+		parsed, err := strconv.ParseUint(port, 10, 16)
+		if err != nil || parsed == 0 {
+			return "", fmt.Errorf("PORT must contain a valid TCP port. The value is %q.", port)
+		}
+		adminAddress = "[::]:" + port
+	}
+	return adminAddress, nil
+}
+
+func validateCommon(c Common, requireConnector bool) error {
 	if c.EdgeID == "" {
-		return Common{}, errors.New("TB_EDGE_ID is required")
+		return errors.New("TB_EDGE_ID is required")
 	}
 	if !validName(c.EdgeID) {
-		return Common{}, errors.New("TB_EDGE_ID must start with a letter or digit and contain at most 63 letters, digits, periods, underscores, or hyphens")
+		return errors.New("TB_EDGE_ID must start with a letter or digit and contain at most 63 letters, digits, periods, underscores, or hyphens")
 	}
 	if requireConnector && (c.ConnectorID == "" || c.Environment == "") {
-		return Common{}, errors.New("TB_CONNECTOR_ID and TB_ENVIRONMENT are required")
+		return errors.New("TB_CONNECTOR_ID and TB_ENVIRONMENT are required")
 	}
 	if c.ConnectorID != "" && !validName(c.ConnectorID) {
-		return Common{}, errors.New("TB_CONNECTOR_ID must start with a letter or digit and contain at most 63 letters, digits, periods, underscores, or hyphens")
+		return errors.New("TB_CONNECTOR_ID must start with a letter or digit and contain at most 63 letters, digits, periods, underscores, or hyphens")
 	}
 	if c.Environment != "" && !validName(c.Environment) {
-		return Common{}, errors.New("TB_ENVIRONMENT must start with a letter or digit and contain at most 63 letters, digits, periods, underscores, or hyphens")
+		return errors.New("TB_ENVIRONMENT must start with a letter or digit and contain at most 63 letters, digits, periods, underscores, or hyphens")
 	}
 	switch c.LogLevel {
 	case "debug", "info", "warn", "error":
 	default:
-		return Common{}, fmt.Errorf("TB_LOG_LEVEL must be debug, info, warn, or error, got %q", c.LogLevel)
+		return fmt.Errorf("TB_LOG_LEVEL must be debug, info, warn, or error, got %q", c.LogLevel)
 	}
-	return c, nil
+	return nil
 }
 
 func connectorTargets(encoded string) ([]ConnectorTarget, error) {

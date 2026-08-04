@@ -53,6 +53,8 @@ type Server struct {
 	udpMu       sync.Mutex
 	udpByKey    map[string]*edgeUDPFlow
 	udpByID     map[uint64]*edgeUDPFlow
+	dnsFlows    int64
+	dnsFlowMax  int64
 }
 
 type connectorEntry struct {
@@ -120,7 +122,9 @@ var (
 )
 
 func New(cfg config.Edge, logger *slog.Logger, state *status.Server) *Server {
-	server := &Server{config: cfg, logger: logger, status: state, registry: make(map[string]*connectorEntry), limit: make(chan struct{}, cfg.MaxTCPFlows), udpByKey: make(map[string]*edgeUDPFlow), udpByID: make(map[uint64]*edgeUDPFlow)}
+	dnsFlowMax := max(cfg.MaxUDPFlows/8, 64)
+	dnsFlowMax = min(dnsFlowMax, cfg.MaxUDPFlows)
+	server := &Server{config: cfg, logger: logger, status: state, registry: make(map[string]*connectorEntry), limit: make(chan struct{}, cfg.MaxTCPFlows), udpByKey: make(map[string]*edgeUDPFlow), udpByID: make(map[uint64]*edgeUDPFlow), dnsFlowMax: dnsFlowMax}
 	configured := make([]status.Connector, 0, len(cfg.Connectors))
 	for _, target := range cfg.Connectors {
 		entry := &connectorEntry{target: target}
@@ -155,11 +159,14 @@ func (s *Server) refreshDynamic(ctx context.Context) error {
 	}
 	s.registryMu.Lock()
 	defer s.registryMu.Unlock()
-	staticCount := len(s.config.Connectors)
-	if staticCount > len(s.routes) {
-		staticCount = len(s.routes)
+	activeKeys := make(map[string]struct{}, len(s.config.Connectors)+len(registrations))
+	routes := make([]*connectorEntry, 0, len(s.config.Connectors)+len(registrations))
+	for _, target := range s.config.Connectors {
+		activeKeys[target.ConnectorID] = struct{}{}
+		if entry := s.registry[target.ConnectorID]; entry != nil {
+			routes = append(routes, entry)
+		}
 	}
-	routes := append([]*connectorEntry(nil), s.routes[:staticCount]...)
 	for _, registration := range registrations {
 		if registration.IdentityType != "dynamic-v3" {
 			continue
@@ -168,14 +175,30 @@ func (s *Server) refreshDynamic(ctx context.Context) error {
 			return entry.target.VirtualPrefix == registration.VirtualPrefix
 		})
 		key := registration.ProjectID + "/" + registration.EnvironmentID
+		activeKeys[key] = struct{}{}
+		virtualBytes := registration.VirtualPrefix.Addr().As16()
+		baseBytes := s.config.VirtualNetwork.Addr().As16()
+		target := config.ConnectorTarget{ConnectorID: key, Environment: registration.EnvironmentID, Slot: int(virtualBytes[1] - baseBytes[1]), VirtualPrefix: registration.VirtualPrefix, RealPrefix: registration.RealPrefix, DNSSuffix: registration.ProjectAlias + "." + registration.EnvironmentAlias + ".railway.internal"}
 		entry := s.registry[key]
-		if entry == nil {
-			virtualBytes := registration.VirtualPrefix.Addr().As16()
-			baseBytes := s.config.VirtualNetwork.Addr().As16()
-			entry = &connectorEntry{target: config.ConnectorTarget{ConnectorID: key, Environment: registration.EnvironmentID, Slot: int(virtualBytes[1] - baseBytes[1]), VirtualPrefix: registration.VirtualPrefix, RealPrefix: registration.RealPrefix, DNSSuffix: registration.ProjectAlias + "." + registration.EnvironmentAlias + ".railway.internal"}}
+		if entry == nil || entry.target != target {
+			if entry != nil {
+				if active := entry.active.Load(); active != nil {
+					_ = active.connection.CloseWithError(0, "connector assignment changed")
+				}
+			}
+			entry = &connectorEntry{target: target}
 			s.registry[key] = entry
 		}
 		routes = append(routes, entry)
+	}
+	for key, entry := range s.registry {
+		if _, keep := activeKeys[key]; keep {
+			continue
+		}
+		if active := entry.active.Load(); active != nil {
+			_ = active.connection.CloseWithError(0, "connector registration is inactive")
+		}
+		delete(s.registry, key)
 	}
 	s.routes = routes
 	configured := make([]status.Connector, 0, len(routes))
@@ -183,7 +206,7 @@ func (s *Server) refreshDynamic(ctx context.Context) error {
 		configured = append(configured, status.Connector{ConnectorID: entry.target.ConnectorID, Slot: entry.target.Slot, VirtualPrefix: entry.target.VirtualPrefix.String(), RealPrefix: entry.target.RealPrefix.String()})
 	}
 	s.status.ReconcileConnectors(configured)
-	s.status.SetRegistryMetrics(stats.Registrations, stats.Active, stats.Allocated, stats.Available, stats.Quarantined, stats.Pending, stats.RoutesPending, stats.CertificatesSoon, stats.LeasesSoon, stats.RegistrationState)
+	s.status.SetRegistryMetrics(stats)
 	return nil
 }
 
@@ -719,6 +742,9 @@ func (s *Server) edgeUDPFlowWithReply(active *session, key string, source *net.U
 	if int64(len(s.udpByID)) >= s.config.MaxUDPFlows {
 		return nil, errors.New("the UDP flow limit is full")
 	}
+	if shared && s.dnsFlows >= s.dnsFlowMax {
+		return nil, errors.New("the DNS flow limit is full")
+	}
 	if reply == nil {
 		var err error
 		reply, err = openUDPResponse(destination)
@@ -729,6 +755,9 @@ func (s *Server) edgeUDPFlowWithReply(active *session, key string, source *net.U
 	flow := &edgeUDPFlow{id: s.flowID.Add(1), key: key, session: active, source: source, destination: destination, translated: translated, reply: reply, sharedReply: shared, lastUsed: time.Now()}
 	s.udpByKey[key] = flow
 	s.udpByID[flow.id] = flow
+	if shared {
+		s.dnsFlows++
+	}
 	s.status.UDPFlowStarted()
 	go func() {
 		ticker := time.NewTicker(s.config.UDPIdleTimeout)
@@ -742,6 +771,9 @@ func (s *Server) edgeUDPFlowWithReply(active *session, key string, source *net.U
 			if time.Since(flow.lastUsed) >= s.config.UDPIdleTimeout {
 				delete(s.udpByKey, key)
 				delete(s.udpByID, flow.id)
+				if flow.sharedReply {
+					s.dnsFlows--
+				}
 				if !flow.sharedReply {
 					_ = flow.reply.Close()
 				}
@@ -800,6 +832,9 @@ func (s *Server) closeUDPSession(active *session) {
 		}
 		delete(s.udpByID, id)
 		delete(s.udpByKey, flow.key)
+		if flow.sharedReply {
+			s.dnsFlows--
+		}
 		if !flow.sharedReply {
 			_ = flow.reply.Close()
 		}
@@ -1061,6 +1096,7 @@ func (s *Server) closeUDPFlows() {
 	flows := s.udpByID
 	s.udpByID = make(map[uint64]*edgeUDPFlow)
 	s.udpByKey = make(map[string]*edgeUDPFlow)
+	s.dnsFlows = 0
 	for _, flow := range flows {
 		if !flow.sharedReply {
 			_ = flow.reply.Close()

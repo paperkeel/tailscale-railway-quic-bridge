@@ -422,6 +422,8 @@ func TestDynamicConfiguration(t *testing.T) {
 		{name: "enrollment nonce", key: "TB_ENROLLMENT_NONCE", value: ""},
 		{name: "project alias", key: "TB_DNS_PROJECT_ALIAS", value: "invalid alias"},
 		{name: "Railway port", key: "PORT", value: "invalid"},
+		{name: "edge identity", key: "TB_EDGE_ID", value: ""},
+		{name: "log level", key: "TB_LOG_LEVEL", value: "verbose"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Setenv(test.key, test.value)
