@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/miekg/dns"
 	"github.com/paperkeel/tailscale-railway-quic-bridge/internal/config"
 	"github.com/paperkeel/tailscale-railway-quic-bridge/internal/netpolicy"
 	"github.com/paperkeel/tailscale-railway-quic-bridge/internal/protocol"
@@ -28,7 +29,6 @@ import (
 	"github.com/paperkeel/tailscale-railway-quic-bridge/internal/registry"
 	"github.com/paperkeel/tailscale-railway-quic-bridge/internal/status"
 	"github.com/paperkeel/tailscale-railway-quic-bridge/internal/transport"
-	"github.com/miekg/dns"
 	"github.com/quic-go/quic-go"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
