@@ -38,7 +38,7 @@
 		"sst": "4.17.1"
 	},
 	"devDependencies": {
-		"@types/node": "22.18.12",
+		"@types/node": "26.3.0",
 		"tsup": "8.5.0",
 		"typescript": "6.0.3",
 		"vitest": "4.1.10"
