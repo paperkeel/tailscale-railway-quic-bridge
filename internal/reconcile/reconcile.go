@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/registry"
-	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/status"
+	"github.com/paperkeel/tailscale-railway-quic-bridge/internal/registry"
+	"github.com/paperkeel/tailscale-railway-quic-bridge/internal/status"
 )
 
 type Policy interface {

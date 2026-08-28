@@ -1,7 +1,7 @@
 .PHONY: check format build cross-build coverage integration fuzz fuzz-frame fuzz-datagram binfmt containers container-smoke validate-deploy audit
 
-GO ?= mise x go@1.26.5 -- go
-GOFMT ?= mise x go@1.26.5 -- gofmt
+GO ?= mise x go@1.26.7 -- go
+GOFMT ?= mise x go@1.26.7 -- gofmt
 COVERAGE_DIR := .coverage
 
 check:

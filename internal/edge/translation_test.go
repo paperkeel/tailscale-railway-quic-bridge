@@ -7,7 +7,7 @@ import (
 	"net/netip"
 	"testing"
 
-	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/config"
+	"github.com/paperkeel/tailscale-railway-quic-bridge/internal/config"
 )
 
 func TestTranslateAddressPreservesLower112Bits(t *testing.T) {

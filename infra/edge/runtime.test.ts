@@ -59,7 +59,7 @@ describe("edge runtime rendering", () => {
 		const template = "image: {{EDGE_IMAGE}}\n";
 
 		expect(renderCompose("internal-testing", template)).toBe(
-			"image: ghcr.io/bearfire-dev/tailscale-railway-quic-bridge-edge:internal-testing\n",
+			"image: ghcr.io/paperkeel/tailscale-railway-quic-bridge-edge:internal-testing\n",
 		);
 		const digest = `sha256:${"a".repeat(64)}`;
 		expect(renderCompose(digest, template)).toContain(`@${digest}`);

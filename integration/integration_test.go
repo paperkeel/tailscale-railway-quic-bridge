@@ -32,10 +32,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/config"
-	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/connector"
-	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/edge"
-	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/status"
+	"github.com/paperkeel/tailscale-railway-quic-bridge/internal/config"
+	"github.com/paperkeel/tailscale-railway-quic-bridge/internal/connector"
+	"github.com/paperkeel/tailscale-railway-quic-bridge/internal/edge"
+	"github.com/paperkeel/tailscale-railway-quic-bridge/internal/status"
 )
 
 const (

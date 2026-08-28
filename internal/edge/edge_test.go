@@ -22,11 +22,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/config"
-	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/protocol"
-	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/registry"
-	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/status"
 	"github.com/miekg/dns"
+	"github.com/paperkeel/tailscale-railway-quic-bridge/internal/config"
+	"github.com/paperkeel/tailscale-railway-quic-bridge/internal/protocol"
+	"github.com/paperkeel/tailscale-railway-quic-bridge/internal/registry"
+	"github.com/paperkeel/tailscale-railway-quic-bridge/internal/status"
 	"github.com/quic-go/quic-go"
 )
 

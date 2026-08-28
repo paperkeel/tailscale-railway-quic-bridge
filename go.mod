@@ -1,4 +1,4 @@
-module github.com/bearfire-dev/tailscale-railway-quic-bridge
+module github.com/paperkeel/tailscale-railway-quic-bridge
 
 go 1.26.0
 

@@ -85,7 +85,7 @@ function required(name: string): string {
 }
 
 function imageReference(component: "edge" | "connector", image: string): string {
-	const repository = `ghcr.io/bearfire-dev/tailscale-railway-quic-bridge-${component}`;
+	const repository = `ghcr.io/paperkeel/tailscale-railway-quic-bridge-${component}`;
 	if (/^sha256:[0-9a-f]{64}$/.test(image)) {
 		return `${repository}@${image}`;
 	}

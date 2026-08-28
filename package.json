@@ -1,5 +1,5 @@
 {
-	"name": "@bearfire-dev/tailscale-railway-quic-bridge",
+	"name": "@paperkeel/tailscale-railway-quic-bridge",
 	"version": "0.0.0-development",
 	"private": false,
 	"type": "module",

@@ -54,7 +54,7 @@ The Railway environment needs private networking. Protected services must listen
 
 You do not need to fork the Tailbridge source repository.
 
-The standard deployment uses a repository from the public [Tailbridge SST template](https://github.com/bearfire-dev/tailbridge-sst-template).
+The standard deployment uses a repository from the public [Tailbridge SST template](https://github.com/paperkeel/tailbridge-sst-template).
 
 The [setup procedure](docs/setup.md) contains all configuration and deployment steps.
 
@@ -69,7 +69,7 @@ api.billing.railway.internal
 
 ## Advanced SST use
 
-The template uses the `@bearfire-dev/tailscale-railway-quic-bridge` package from GitHub Packages.
+The template uses the `@paperkeel/tailscale-railway-quic-bridge` package from GitHub Packages.
 
 Advanced SST projects can import the `Tailbridge` component directly. The [setup procedure](docs/setup.md) contains the package and component details.
 
@@ -78,9 +78,9 @@ Advanced SST projects can import the `Tailbridge` component directly. The [setup
 Releases publish these images:
 
 ```text
-ghcr.io/bearfire-dev/tailscale-railway-quic-bridge-edge
-ghcr.io/bearfire-dev/tailscale-railway-quic-bridge-connector
-ghcr.io/bearfire-dev/tailscale-railway-quic-bridge-cli
+ghcr.io/paperkeel/tailscale-railway-quic-bridge-edge
+ghcr.io/paperkeel/tailscale-railway-quic-bridge-connector
+ghcr.io/paperkeel/tailscale-railway-quic-bridge-cli
 ```
 
 The deployment workflow resolves each `master` image to an immutable digest. It stores the deployed digest pair in SST state.

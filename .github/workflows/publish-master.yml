@@ -51,8 +51,8 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ghcr.io/bearfire-dev/tailscale-railway-quic-bridge-${{ matrix.component }}:sha-${{ env.SOURCE_COMMIT }}
-            ghcr.io/bearfire-dev/tailscale-railway-quic-bridge-${{ matrix.component }}:master
+            ghcr.io/paperkeel/tailscale-railway-quic-bridge-${{ matrix.component }}:sha-${{ env.SOURCE_COMMIT }}
+            ghcr.io/paperkeel/tailscale-railway-quic-bridge-${{ matrix.component }}:master
           build-args: VERSION=sha-${{ env.SOURCE_COMMIT }}
           provenance: mode=max
           sbom: true
@@ -72,7 +72,7 @@ jobs:
       - uses: actions/attest-build-provenance@78e6cbd37d0ac1a40113c04f2037dacf1ea3f12e # v4
         if: github.event.repository.visibility == 'public'
         with:
-          subject-name: ghcr.io/bearfire-dev/tailscale-railway-quic-bridge-${{ matrix.component }}
+          subject-name: ghcr.io/paperkeel/tailscale-railway-quic-bridge-${{ matrix.component }}
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
 
@@ -99,7 +99,7 @@ jobs:
           node-version: 22
           cache: pnpm
           registry-url: https://npm.pkg.github.com
-          scope: "@bearfire-dev"
+          scope: "@paperkeel"
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: "*-digest"
@@ -113,8 +113,8 @@ jobs:
           connector_digest="$(cat "$RUNNER_TEMP/digests/connector-digest.txt")"
           export TAILBRIDGE_SOURCE_COMMIT="$SOURCE_COMMIT"
           export TAILBRIDGE_PACKAGE_VERSION="$version"
-          export TAILBRIDGE_EDGE_IMAGE="ghcr.io/bearfire-dev/tailscale-railway-quic-bridge-edge@$edge_digest"
-          export TAILBRIDGE_CONNECTOR_IMAGE="ghcr.io/bearfire-dev/tailscale-railway-quic-bridge-connector@$connector_digest"
+          export TAILBRIDGE_EDGE_IMAGE="ghcr.io/paperkeel/tailscale-railway-quic-bridge-edge@$edge_digest"
+          export TAILBRIDGE_CONNECTOR_IMAGE="ghcr.io/paperkeel/tailscale-railway-quic-bridge-connector@$connector_digest"
           pnpm version "$version" --no-git-tag-version
           pnpm build:metadata
           pnpm build:package
@@ -123,7 +123,7 @@ jobs:
         env:
           VERSION: 0.0.0-sha.${{ env.SOURCE_COMMIT }}
         run: |
-          package="$RUNNER_TEMP/bearfire-dev-tailscale-railway-quic-bridge-$VERSION.tgz"
+          package="$RUNNER_TEMP/paperkeel-tailscale-railway-quic-bridge-$VERSION.tgz"
           test -f "$package"
           test_directory="$RUNNER_TEMP/package-test"
           mkdir -p "$test_directory"
@@ -131,11 +131,11 @@ jobs:
           pnpm --dir "$test_directory" add --ignore-scripts "$package"
           cd "$test_directory"
           node --input-type=module --eval \
-            "const module = await import('@bearfire-dev/tailscale-railway-quic-bridge'); if (typeof module.Tailbridge !== 'function') process.exit(1)"
+            "const module = await import('@paperkeel/tailscale-railway-quic-bridge'); if (typeof module.Tailbridge !== 'function') process.exit(1)"
       - name: Publish the package
         env:
           VERSION: 0.0.0-sha.${{ env.SOURCE_COMMIT }}
         run: |
-          package="$RUNNER_TEMP/bearfire-dev-tailscale-railway-quic-bridge-$VERSION.tgz"
+          package="$RUNNER_TEMP/paperkeel-tailscale-railway-quic-bridge-$VERSION.tgz"
           pnpm publish "$package" --access public --no-git-checks --tag "sha-$SOURCE_COMMIT"
-          pnpm dist-tag add "@bearfire-dev/tailscale-railway-quic-bridge@$VERSION" master
+          pnpm dist-tag add "@paperkeel/tailscale-railway-quic-bridge@$VERSION" master

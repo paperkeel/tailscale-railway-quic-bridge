@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const edgeImageRepository =
-	"ghcr.io/bearfire-dev/tailscale-railway-quic-bridge-edge";
+	"ghcr.io/paperkeel/tailscale-railway-quic-bridge-edge";
 const composePath = fileURLToPath(new URL("./compose.yml", import.meta.url));
 
 export interface EdgeEnvironment {

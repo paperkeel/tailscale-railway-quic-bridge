@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-const module = "github.com/bearfire-dev/tailscale-railway-quic-bridge/"
+const module = "github.com/paperkeel/tailscale-railway-quic-bridge/"
 
 type coverage struct {
 	covered int
