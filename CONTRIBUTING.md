@@ -1,6 +1,6 @@
 # Contributing
 
-1. Install Go 1.26.5 through `mise`.
+1. Install Go 1.26.7 through `mise`.
 
 2. Run the standard checks before you open a pull request:
 
