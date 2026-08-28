@@ -38,10 +38,16 @@ jobs:
       - run: make GO=go GOFMT=gofmt coverage
 
   containers:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
-        component: [edge, connector, cli]
+        include:
+          - component: edge
+            runner: blacksmith-8vcpu-ubuntu-2404
+          - component: connector
+            runner: blacksmith-8vcpu-ubuntu-2404
+          - component: cli
+            runner: blacksmith-2vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
