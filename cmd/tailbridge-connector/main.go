@@ -8,12 +8,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/config"
-	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/connector"
-	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/enrollment"
-	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/logging"
-	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/observability"
-	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/status"
+	"github.com/paperkeel/tailscale-railway-quic-bridge/internal/config"
+	"github.com/paperkeel/tailscale-railway-quic-bridge/internal/connector"
+	"github.com/paperkeel/tailscale-railway-quic-bridge/internal/enrollment"
+	"github.com/paperkeel/tailscale-railway-quic-bridge/internal/logging"
+	"github.com/paperkeel/tailscale-railway-quic-bridge/internal/observability"
+	"github.com/paperkeel/tailscale-railway-quic-bridge/internal/status"
 	"golang.org/x/sync/errgroup"
 )
 

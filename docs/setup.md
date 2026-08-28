@@ -9,7 +9,7 @@ Do not deploy infrastructure from the Tailbridge source repository.
 Use the `stable` connector image tag for the standard Railway template:
 
 ```text
-ghcr.io/bearfire-dev/tailscale-railway-quic-bridge-connector:stable
+ghcr.io/paperkeel/tailscale-railway-quic-bridge-connector:stable
 ```
 
 Railway can follow a changed digest for this tag during a maintenance window. Use the `master` tag only for an explicit canary. A merge to the Tailbridge `master` branch updates that tag.
@@ -84,7 +84,7 @@ Use a policy in this form. Replace every example value:
     },
     "oneOfClaims": {
       "job_workflow_ref": [
-        "bearfire-dev/tailscale-railway-quic-bridge/.github/workflows/tailbridge-enroll.yml@FULL_COMMIT_SHA"
+        "paperkeel/tailscale-railway-quic-bridge/.github/workflows/tailbridge-enroll.yml@FULL_COMMIT_SHA"
       ]
     },
     "projectIdClaim": "repo_property_tailbridge_railway_project_id",
@@ -106,18 +106,18 @@ The edge validates `exp`, `nbf`, `iat`, `jti`, the issuer, the audience, and all
 
 1. Create a private infrastructure repository.
 
-2. Configure the `@bearfire-dev` GitHub Packages registry.
+2. Configure the `@paperkeel` GitHub Packages registry.
 
 3. Install an exact Tailbridge package version:
 
    ```bash
-   pnpm add @bearfire-dev/tailscale-railway-quic-bridge@0.0.0-sha.FULL_COMMIT_SHA
+   pnpm add @paperkeel/tailscale-railway-quic-bridge@0.0.0-sha.FULL_COMMIT_SHA
    ```
 
 4. Define the edge in `sst.config.ts`:
 
    ```typescript
-   import { Tailbridge } from "@bearfire-dev/tailscale-railway-quic-bridge";
+   import { Tailbridge } from "@paperkeel/tailscale-railway-quic-bridge";
 
    const tailbridge = new Tailbridge("Tailbridge", {
      stage: $app.stage,
@@ -168,7 +168,7 @@ Create the template in the Railway workspace that will own the connectors.
 1. Use this public image by default:
 
    ```text
-   ghcr.io/bearfire-dev/tailscale-railway-quic-bridge-connector:stable
+   ghcr.io/paperkeel/tailscale-railway-quic-bridge-connector:stable
    ```
 
 2. Enable image updates for a changed `stable` digest.

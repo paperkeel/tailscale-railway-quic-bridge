@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/config"
-	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/protocol"
+	"github.com/paperkeel/tailscale-railway-quic-bridge/internal/config"
+	"github.com/paperkeel/tailscale-railway-quic-bridge/internal/protocol"
 )
 
 func ServerTLS(c config.Common) (*tls.Config, error) {

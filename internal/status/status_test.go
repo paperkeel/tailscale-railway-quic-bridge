@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bearfire-dev/tailscale-railway-quic-bridge/internal/registry"
+	"github.com/paperkeel/tailscale-railway-quic-bridge/internal/registry"
 	"github.com/quic-go/quic-go"
 )
 

@@ -31,7 +31,7 @@ jobs:
       - uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         id: meta
         with:
-          images: ghcr.io/bearfire-dev/tailscale-railway-quic-bridge-${{ matrix.component }}
+          images: ghcr.io/paperkeel/tailscale-railway-quic-bridge-${{ matrix.component }}
           tags: |
             type=raw,value=internal-testing,enable=${{ github.ref_name == 'internal-testing' }}
             type=semver,pattern={{version}}
@@ -55,6 +55,6 @@ jobs:
       - uses: actions/attest-build-provenance@78e6cbd37d0ac1a40113c04f2037dacf1ea3f12e # v4
         if: github.event.repository.visibility == 'public'
         with:
-          subject-name: ghcr.io/bearfire-dev/tailscale-railway-quic-bridge-${{ matrix.component }}
+          subject-name: ghcr.io/paperkeel/tailscale-railway-quic-bridge-${{ matrix.component }}
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
