@@ -38,11 +38,31 @@ func TestRunReturnsConfigurationExitCodeWhenAdminAddressIsOccupied(t *testing.T)
 	}
 }
 
+func TestRunReturnsSuccessAfterCancellation(t *testing.T) {
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminAddress := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	setValidEdgeEnvironment(t, adminAddress)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if code := run(ctx); code != 0 {
+		t.Fatalf("expected exit code 0, got %d", code)
+	}
+}
+
 func setValidEdgeEnvironment(t *testing.T, adminAddress string) {
 	t.Helper()
 	certificate, key := testCredentials(t)
 	for name, value := range map[string]string{
+		"TB_EDGE_ID":                  "test-edge",
 		"TB_CONNECTOR_ID":             "test-connector",
+		"TB_CONNECTORS_B64":           base64.StdEncoding.EncodeToString([]byte(`[{"connectorId":"test-connector","environment":"test","slot":0,"virtualPrefix":"fd20::/16","realPrefix":"fd12::/16","dnsSuffix":"test.railway.internal"}]`)),
 		"TB_ENVIRONMENT":              "test",
 		"TB_MTLS_CA_B64":              certificate,
 		"TB_MTLS_CERT_B64":            certificate,
