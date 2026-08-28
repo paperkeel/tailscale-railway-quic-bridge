@@ -32,7 +32,7 @@
 	"dependencies": {
 		"@pulumi/command": "1.2.1",
 		"@pulumi/digitalocean": "4.78.0",
-		"@pulumi/pulumi": "3.255.0",
+		"@pulumi/pulumi": "3.259.0",
 		"@pulumi/tls": "5.5.1",
 		"@sst-provider/railway": "0.6.1",
 		"sst": "4.17.1"
