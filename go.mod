@@ -3,7 +3,7 @@ module github.com/paperkeel/tailscale-railway-quic-bridge
 go 1.26.0
 
 require (
-	github.com/getsentry/sentry-go v0.48.0
+	github.com/getsentry/sentry-go v0.49.0
 	github.com/miekg/dns v1.1.72
 	github.com/quic-go/quic-go v0.61.0
 	go.opentelemetry.io/otel v1.44.0
