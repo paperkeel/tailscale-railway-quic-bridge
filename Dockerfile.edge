@@ -8,7 +8,7 @@ ARG TARGETOS
 ARG TARGETARCH
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/tailbridge-edge ./cmd/tailbridge-edge
 
-FROM tailscale/tailscale:v1.98.8@sha256:d54b2e6a9c09f0e5ec52e82b9ad4af3d446b54a7c08075e92f11c39dd410105f
+FROM tailscale/tailscale:v1.102.5@sha256:c507f3a2a6ab1cabd8d809b98edeb41edbd5c3fb6ad9632ffd098b4c7d0b4065
 RUN apk add --no-cache iproute2 nftables
 COPY --from=build /out/tailbridge-edge /usr/local/bin/tailbridge-edge
 ENTRYPOINT ["/usr/local/bin/tailbridge-edge"]
